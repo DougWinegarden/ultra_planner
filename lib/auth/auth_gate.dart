@@ -41,7 +41,7 @@ class _AuthGateState extends State<AuthGate> {
             'lib/firebase_options.dart still contains placeholder values.\n\n'
             'Sign in to the Firebase project, run "flutterfire configure" to '
             'regenerate that file, then restart the app.\n\n'
-            'Step-by-step instructions are in FIREBASE_SETUP.md.',
+            'Step-by-step instructions are in SETUP.md.',
       );
     }
 

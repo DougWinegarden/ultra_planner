@@ -13,7 +13,7 @@ credentials are filled in. `lib/firebase_options.dart` ships with placeholders
 because `flutterfire configure` has to be run by the owner of the Firebase
 project.
 
-**→ Follow [FIREBASE_SETUP.md](FIREBASE_SETUP.md).** It covers enabling
+**→ Follow [SETUP.md](SETUP.md).** It covers enabling
 email/password sign-in, generating credentials, deploying the security rules,
 and the macOS network entitlement.
 
@@ -42,7 +42,7 @@ startup path. None of them need a live Firebase project.
 ```
 lib/
   main.dart                        app bootstrap + planner UI
-  firebase_options.dart            PLACEHOLDERS -- see FIREBASE_SETUP.md
+  firebase_options.dart            PLACEHOLDERS -- see SETUP.md
   gemini_quackers_service.dart     Gemini API client
   auth/
     auth_gate.dart                 setup notice / login / planner routing
@@ -62,7 +62,7 @@ firestore.rules                    security rules -- must be deployed
 Entered once by the signed-in user (account menu → **Add Gemini API key**) and
 saved to their Firestore settings document, so it is not re-entered on the next
 launch or on another device. See the security note at the end of
-FIREBASE_SETUP.md for what that does and does not protect.
+SETUP.md for what that does and does not protect.
 
 The build-time `--dart-define=GEMINI_API_KEY=...` path still works as a fallback
 when no key is saved to the account.

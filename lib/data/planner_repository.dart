@@ -6,7 +6,7 @@ import 'models.dart';
 
 /// Reads and writes the signed-in user's lists and tasks.
 ///
-/// Firestore layout (see FIREBASE_SETUP.md):
+/// Firestore layout (see SETUP.md):
 ///
 ///   lists/{listId}  { ownerId, name, order, createdAt }
 ///   tasks/{taskId}  { ownerId, listId, name, dueDate, isDone, createdAt }
