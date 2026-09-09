@@ -1,0 +1,43 @@
+rules_version = '2';
+
+// Ocean Lists security rules.
+//
+// Deploy with:   firebase deploy --only firestore:rules
+//
+// Everything is deny-by-default. A path that is not matched below is closed, so
+// adding a new collection means adding a rule for it here too.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // A document belongs to the caller when its ownerId is their uid.
+    function owns(data) {
+      return isSignedIn() && data.ownerId == request.auth.uid;
+    }
+
+    // Task lists. The app queries these with where('ownerId', '==', uid), which
+    // is what makes the read rule satisfiable for a collection query.
+    match /lists/{listId} {
+      allow read, delete: if owns(resource.data);
+      allow create: if owns(request.resource.data);
+      // Both sides are checked so a list cannot be handed to another account.
+      allow update: if owns(resource.data) && owns(request.resource.data);
+    }
+
+    // Individual tasks, each carrying the id of its parent list.
+    match /tasks/{taskId} {
+      allow read, delete: if owns(resource.data);
+      allow create: if owns(request.resource.data);
+      allow update: if owns(resource.data) && owns(request.resource.data);
+    }
+
+    // Per-user settings, including the Gemini API key. Readable and writable
+    // only by the account that owns the path -- never by another signed-in user.
+    match /users/{userId}/private/{document} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+  }
+}
