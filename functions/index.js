@@ -43,7 +43,7 @@ const ENCRYPTION_KEY = defineSecret("GEMINI_KEY_ENCRYPTION_KEY");
 
 /** Model id, overridable via functions/.env without a code change. */
 const GEMINI_MODEL = defineString("GEMINI_MODEL", {
-  default: "gemini-2.5-flash-lite",
+  default: "gemini-3.5-flash-lite",
 });
 
 // --- Limits -----------------------------------------------------------------

@@ -451,7 +451,7 @@ the user can actually fix.
 Set `GEMINI_MODEL` in `functions/.env` and redeploy:
 
 ```
-GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_MODEL=gemini-3.5-flash-lite
 ```
 
 If Quackers reports the configured model was not found, check
