@@ -11,7 +11,6 @@ import 'auth/auth_gate.dart';
 import 'auth/auth_service.dart';
 import 'data/models.dart';
 import 'data/planner_repository.dart';
-import 'data/user_settings_repository.dart';
 import 'firebase_options.dart';
 import 'gemini_quackers_service.dart';
 import 'widgets/ocean_background.dart';
@@ -78,7 +77,6 @@ class OceanListsPage extends StatefulWidget {
 class _OceanListsPageState extends State<OceanListsPage> {
   final GeminiQuackersService _quackers = GeminiQuackersService();
   late final PlannerRepository _planner;
-  late final UserSettingsRepository _settings;
 
   StreamSubscription<List<TaskListData>>? _listSub;
   List<TaskListData> _lists = <TaskListData>[];
@@ -97,15 +95,12 @@ class _OceanListsPageState extends State<OceanListsPage> {
   void initState() {
     super.initState();
     _planner = PlannerRepository(uid: widget.user.uid);
-    _settings = UserSettingsRepository(uid: widget.user.uid);
     _subscribeToLists();
-    _restoreGeminiApiKey();
   }
 
   @override
   void dispose() {
     _listSub?.cancel();
-    _quackers.dispose();
     super.dispose();
   }
 
@@ -139,24 +134,6 @@ class _OceanListsPageState extends State<OceanListsPage> {
         });
       },
     );
-  }
-
-  /// Pulls the saved Gemini key so the assistant is ready without re-entry.
-  Future<void> _restoreGeminiApiKey() async {
-    try {
-      final String? key = await _settings.loadGeminiApiKey();
-      if (key != null) {
-        _quackers.setApiKey(key);
-        if (mounted) setState(() {});
-      }
-    } catch (_) {
-      // Not fatal -- the assistant just falls back to its setup screen.
-    }
-  }
-
-  Future<void> _persistGeminiApiKey(String apiKey) async {
-    _quackers.setApiKey(apiKey);
-    await _settings.saveGeminiApiKey(apiKey);
   }
 
   static String _describeFirestoreError(Object error) {
@@ -658,7 +635,6 @@ class _OceanListsPageState extends State<OceanListsPage> {
           suggestedTask: pick?.task.name,
           suggestedTip: _assistantTip,
           userId: widget.user.uid,
-          onSaveApiKey: _persistGeminiApiKey,
           onStartSuggestedTask: pick == null
               ? null
               : () {
@@ -865,11 +841,8 @@ class _OceanListsPageState extends State<OceanListsPage> {
       tooltip: 'Account',
       offset: const Offset(0, 44),
       onSelected: (String value) {
-        switch (value) {
-          case 'signout':
-            _signOut();
-          case 'apikey':
-            _showApiKeyDialog();
+        if (value == 'signout') {
+          _signOut();
         }
       },
       itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
@@ -898,19 +871,6 @@ class _OceanListsPageState extends State<OceanListsPage> {
           ),
         ),
         const PopupMenuDivider(),
-        PopupMenuItem<String>(
-          value: 'apikey',
-          child: ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.key_outlined, size: 20),
-            title: Text(
-              _quackers.isConfigured
-                  ? 'Change Gemini API key'
-                  : 'Add Gemini API key',
-            ),
-          ),
-        ),
         const PopupMenuItem<String>(
           value: 'signout',
           child: ListTile(
@@ -933,97 +893,6 @@ class _OceanListsPageState extends State<OceanListsPage> {
         ),
       ),
     );
-  }
-
-  /// Lets the key be set (or replaced) without going through the chat sheet.
-  Future<void> _showApiKeyDialog() async {
-    final TextEditingController controller = TextEditingController();
-    bool obscured = true;
-
-    final String? key = await showDialog<String>(
-      context: context,
-      builder: (BuildContext dialogContext) {
-        return StatefulBuilder(
-          builder:
-              (
-                BuildContext context,
-                void Function(void Function()) setDialogState,
-              ) {
-                return AlertDialog(
-                  title: const Text('Gemini API key'),
-                  content: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: <Widget>[
-                      const Text(
-                        'Saved to your account, so you only set it up once.',
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: Color(0xFF41708A),
-                        ),
-                      ),
-                      const SizedBox(height: 14),
-                      TextField(
-                        controller: controller,
-                        autofocus: true,
-                        obscureText: obscured,
-                        decoration: InputDecoration(
-                          labelText: 'API key',
-                          border: const OutlineInputBorder(),
-                          suffixIcon: IconButton(
-                            icon: Icon(
-                              obscured
-                                  ? Icons.visibility_outlined
-                                  : Icons.visibility_off_outlined,
-                            ),
-                            onPressed: () => setDialogState(
-                              () => obscured = !obscured,
-                            ),
-                          ),
-                        ),
-                        onSubmitted: (String value) {
-                          if (value.trim().isNotEmpty) {
-                            Navigator.of(dialogContext).pop(value.trim());
-                          }
-                        },
-                      ),
-                    ],
-                  ),
-                  actions: <Widget>[
-                    TextButton(
-                      onPressed: () => Navigator.of(dialogContext).pop(),
-                      child: const Text('Cancel'),
-                    ),
-                    FilledButton(
-                      onPressed: () {
-                        final String value = controller.text.trim();
-                        if (value.isNotEmpty) {
-                          Navigator.of(dialogContext).pop(value);
-                        }
-                      },
-                      child: const Text('Save'),
-                    ),
-                  ],
-                );
-              },
-        );
-      },
-    );
-
-    if (key == null || !mounted) return;
-
-    try {
-      await _persistGeminiApiKey(key);
-      if (!mounted) return;
-      setState(() {});
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Gemini key saved to your account.')),
-      );
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not save key: $error')),
-      );
-    }
   }
 
   Widget _buildMainNavigation() {
@@ -1881,7 +1750,6 @@ class QuackersChatSheet extends StatefulWidget {
     required this.taskContext,
     required this.suggestedTip,
     required this.userId,
-    required this.onSaveApiKey,
     this.suggestedTask,
     this.onStartSuggestedTask,
   });
@@ -1893,9 +1761,6 @@ class QuackersChatSheet extends StatefulWidget {
   /// Scopes locally-cached chat history so two accounts on one device do not
   /// read each other's conversations.
   final String userId;
-
-  /// Persists the key to the user's Firestore settings document.
-  final Future<void> Function(String apiKey) onSaveApiKey;
 
   final String? suggestedTask;
   final VoidCallback? onStartSuggestedTask;
@@ -1909,18 +1774,14 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
 
   String get _chatStorageKey => '$_chatStoragePrefix.${widget.userId}';
   final TextEditingController _controller = TextEditingController();
-  final TextEditingController _apiKeyController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final List<QuackersChatMessage> _messages = <QuackersChatMessage>[];
   bool _isSending = false;
-  bool _isApiKeyVisible = false;
-  late bool _isReady;
   bool _isLoadingHistory = true;
 
   @override
   void initState() {
     super.initState();
-    _isReady = widget.service.isConfigured;
     _loadHistory();
   }
 
@@ -1928,7 +1789,6 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
   void dispose() {
     _saveHistory();
     _controller.dispose();
-    _apiKeyController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
@@ -2054,30 +1914,6 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
     );
   }
 
-  Future<void> _saveApiKey() async {
-    final String key = _apiKeyController.text.trim();
-    if (key.isEmpty) return;
-
-    setState(() {
-      _isReady = true;
-      _apiKeyController.clear();
-    });
-
-    try {
-      await widget.onSaveApiKey(key);
-    } catch (error) {
-      // The key still works for this session; it just did not persist.
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Key saved for now, but could not sync to your account: $error',
-          ),
-        ),
-      );
-    }
-  }
-
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
@@ -2117,9 +1953,7 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
                 ],
               ),
               const SizedBox(height: 10),
-              if (!_isReady)
-                Expanded(child: _buildApiKeySetup())
-              else if (_isLoadingHistory)
+              if (_isLoadingHistory)
                 const Expanded(
                   child: Center(child: CircularProgressIndicator()),
                 )
@@ -2244,72 +2078,6 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
           ),
         ],
       ],
-    ),
-  );
-
-  Widget _buildApiKeySetup() => Center(
-    child: Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: const Color(0xFF90E0EF)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          const Icon(Icons.key_rounded, size: 36, color: Color(0xFF0077B6)),
-          const SizedBox(height: 10),
-          const Text(
-            'Connect Quackers to Gemini',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 18,
-              color: Color(0xFF003B5C),
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Paste your Gemini API key to start chatting. It is used only for this app session.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Color(0xFF456D7F)),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _apiKeyController,
-            obscureText: !_isApiKeyVisible,
-            autocorrect: false,
-            enableSuggestions: false,
-            onSubmitted: (_) => _saveApiKey(),
-            decoration: InputDecoration(
-              labelText: 'Gemini API key',
-              hintText: 'AIza…',
-              filled: true,
-              fillColor: const Color(0xFFF4FCFF),
-              border: const OutlineInputBorder(),
-              suffixIcon: IconButton(
-                tooltip: _isApiKeyVisible ? 'Hide key' : 'Show key',
-                icon: Icon(
-                  _isApiKeyVisible ? Icons.visibility_off : Icons.visibility,
-                ),
-                onPressed: () =>
-                    setState(() => _isApiKeyVisible = !_isApiKeyVisible),
-              ),
-            ),
-          ),
-          const SizedBox(height: 14),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton.icon(
-              onPressed: _saveApiKey,
-              icon: const Icon(Icons.chat_bubble_outline),
-              label: const Text('Start chatting'),
-            ),
-          ),
-        ],
-      ),
     ),
   );
 }

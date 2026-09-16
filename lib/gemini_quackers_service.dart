@@ -1,6 +1,4 @@
-import 'dart:convert';
-
-import 'package:http/http.dart' as http;
+import 'package:cloud_functions/cloud_functions.dart';
 
 class QuackersChatMessage {
   const QuackersChatMessage({required this.text, required this.isUser});
@@ -9,124 +7,79 @@ class QuackersChatMessage {
   final bool isUser;
 }
 
+/// Talks to Quackers through the `askQuackers` Cloud Function.
+///
+/// The Gemini API key is never held here. It lives in Secret Manager and is
+/// read only inside the function, so nothing the client can inspect -- the app
+/// bundle, Firestore, or the device -- contains a usable credential. The
+/// function requires a signed-in caller and rate limits per account, since one
+/// key now serves every user.
+///
+/// See functions/index.js and the deployment steps in SETUP.md.
 class GeminiQuackersService {
-  GeminiQuackersService({http.Client? client})
-    : _client = client ?? http.Client();
+  GeminiQuackersService({FirebaseFunctions? functions})
+    : _functions = functions ?? FirebaseFunctions.instance;
 
-  static const String _buildTimeApiKey = String.fromEnvironment(
-    'GEMINI_API_KEY',
-  );
-  static const String _endpoint =
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent';
+  /// Must match the region the function is deployed to (functions/index.js).
+  static const String _region = 'us-central1';
+  static const String _callableName = 'askQuackers';
 
-  final http.Client _client;
-  String? _sessionApiKey;
+  final FirebaseFunctions? _functions;
 
-  bool get isConfigured => activeApiKey.isNotEmpty;
-
-  String get activeApiKey => _sessionApiKey ?? _buildTimeApiKey;
-
-  void setApiKey(String apiKey) {
-    _sessionApiKey = apiKey.trim();
-  }
+  FirebaseFunctions get _client =>
+      _functions ?? FirebaseFunctions.instanceFor(region: _region);
 
   Future<String> respond({
     required String question,
     required String taskContext,
     required List<QuackersChatMessage> conversation,
   }) async {
-    if (!isConfigured) {
-      throw const QuackersException(
-        'Quackers needs a Gemini key before chatting. Run with '
-        '--dart-define=GEMINI_API_KEY=your_key.',
-      );
-    }
+    try {
+      final HttpsCallableResult<dynamic> result = await _client
+          .httpsCallable(_callableName)
+          .call<dynamic>(<String, dynamic>{
+            'question': question,
+            'taskContext': taskContext,
+            'conversation': conversation
+                .map(
+                  (QuackersChatMessage message) => <String, dynamic>{
+                    'text': message.text,
+                    'isUser': message.isUser,
+                  },
+                )
+                .toList(),
+          });
 
-    final List<Map<String, dynamic>> contents = <Map<String, dynamic>>[
-      ...conversation.map(
-        (QuackersChatMessage message) => <String, dynamic>{
-          'role': message.isUser ? 'user' : 'model',
-          'parts': <Map<String, String>>[
-            <String, String>{'text': message.text},
-          ],
-        },
-      ),
-      <String, dynamic>{
-        'role': 'user',
-        'parts': <Map<String, String>>[
-          <String, String>{'text': question},
-        ],
-      },
-    ];
+      final Object? data = result.data;
+      final String? text = data is Map
+          ? data['text']?.toString()
+          : data?.toString();
 
-    final http.Response response = await _client.post(
-      Uri.parse(_endpoint),
-      headers: <String, String>{
-        'Content-Type': 'application/json',
-        'x-goog-api-key': activeApiKey,
-      },
-      body: jsonEncode(<String, dynamic>{
-        'systemInstruction': <String, dynamic>{
-          'parts': <Map<String, String>>[
-            <String, String>{
-              'text':
-                  'You are Quackers, a warm, playful capybara in a duck suit. Answer the user’s questions helpfully, '
-                  'including general questions, while also being a great task-planning buddy. '
-                  'Use only the task context below for claims about the user’s tasks. For task or planning questions, '
-                  'give short, practical advice and prioritize one next action when asked. Never pretend to have completed a task. '
-                  'Do not refuse a normal, safe question merely because it is unrelated to tasks. '
-                  'Keep answers to five short sentences or fewer unless the user asks for more detail. '
-                  'Always finish your final sentence; never end mid-sentence.\n\n'
-                  'TASK CONTEXT:\n$taskContext',
-            },
-          ],
-        },
-        'contents': contents,
-        'generationConfig': <String, dynamic>{
-          'maxOutputTokens': 2048,
-          'thinkingConfig': <String, dynamic>{'thinkingLevel': 'minimal'},
-        },
-      }),
-    );
-
-    final Map<String, dynamic> body =
-        jsonDecode(response.body) as Map<String, dynamic>;
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      final String message = body['error'] is Map<String, dynamic>
-          ? (body['error'] as Map<String, dynamic>)['message']?.toString() ??
-                'Gemini could not respond.'
-          : 'Gemini could not respond.';
+      if (text == null || text.trim().isEmpty) {
+        throw const QuackersException(
+          'Quackers did not receive a response. Please try again.',
+        );
+      }
+      return text.trim();
+    } on FirebaseFunctionsException catch (error) {
       throw QuackersException(
-        message,
-        retryable: response.statusCode == 429 || response.statusCode >= 500,
+        error.message ?? 'Quackers could not answer that one.',
+        // These are the codes the function raises for conditions that clear on
+        // their own; everything else needs a change, not a retry.
+        retryable:
+            error.code == 'unavailable' || error.code == 'resource-exhausted',
       );
     }
-
-    final List<dynamic>? candidates = body['candidates'] as List<dynamic>?;
-    final Map<String, dynamic>? candidate = candidates?.isNotEmpty == true
-        ? candidates!.first as Map<String, dynamic>
-        : null;
-    final Map<String, dynamic>? content =
-        candidate?['content'] as Map<String, dynamic>?;
-    final List<dynamic>? parts = content?['parts'] as List<dynamic>?;
-    final Map<String, dynamic>? firstPart = parts?.isNotEmpty == true
-        ? parts!.first as Map<String, dynamic>
-        : null;
-    final String? text = firstPart?['text']?.toString();
-    if (text == null || text.trim().isEmpty) {
-      throw const QuackersException(
-        'Quackers did not receive a response. Please try again.',
-      );
-    }
-    return text.trim();
   }
-
-  void dispose() => _client.close();
 }
 
+/// A chat failure that already carries a user-facing message.
 class QuackersException implements Exception {
   const QuackersException(this.message, {this.retryable = false});
 
   final String message;
   final bool retryable;
+
+  @override
+  String toString() => 'QuackersException: $message';
 }

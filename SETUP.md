@@ -239,14 +239,12 @@ remember — password reset emails only work for real addresses.
 
 You'll get two starter lists ("School" and "Shopping") on first sign-in.
 
-## 4.2 Add your Gemini API key
+## 4.2 The assistant
 
-Get a free key at <https://aistudio.google.com/apikey>.
+Quackers needs the Cloud Function from **Part 5** before it will reply. Nothing
+is entered in the app -- the key is deployed once and serves every user.
 
-In the app: **avatar menu (top right) → Add Gemini API key → paste → Save.**
-
-The key is saved to your account, so you only do this once — it loads
-automatically on every later sign-in, on any device.
+Everything else (lists, tasks, the calendar) works without it.
 
 ---
 
@@ -258,7 +256,8 @@ automatically on every later sign-in, on any device.
       **Firestore Database → tasks**
 - [ ] Logging out and back in shows your tasks again
 - [ ] Quackers replies when you ask it something
-- [ ] `flutter test` passes (24 tests)
+- [ ] `flutter test` passes (22 tests)
+- [ ] `cd functions && npm test` passes (8 tests)
 
 ---
 
@@ -316,24 +315,135 @@ in the calendar.
 
 ---
 
-# A note on the Gemini key
+# Part 5 - Deploy the Quackers Cloud Function
 
-The key is stored in `users/{uid}/private/settings` and the rules stop any other
-signed-in user from reading it.
+Quackers talks to Gemini through a Cloud Function. The API key lives in Google
+Secret Manager and is read only inside that function, so it never reaches the
+app. Users do not enter a key, and there is no key stored in Firestore for
+anyone to read.
 
-**What that does not protect:** it is stored in plaintext, so anyone with owner
-access to the Firebase console can read it, and it still reaches the device at
-runtime. That is fine for a personal project. If this app is ever given to other
-people, move the Gemini call into a Cloud Function so the key never reaches the
-client at all.
+> **This part requires the Blaze plan.** Cloud Functions cannot be deployed on
+> the free Spark plan. Blaze is pay-as-you-go with a generous free tier (2M
+> function invocations/month), but it needs a card on file. Upgrade at
+> **Firebase console -> the gear icon -> Usage and billing -> Modify plan**.
+>
+> Everything in Parts 1-4 works on Spark. Only the assistant needs this.
 
-The build-time fallback still works when no key is saved to the account:
+## 5.1 Get a Gemini API key
+
+<https://aistudio.google.com/apikey>
+
+If you previously pasted a key into the app, **generate a new one and delete the
+old one**. The old key was stored in plaintext in Firestore and should be
+treated as compromised.
+
+## 5.2 Store the key as a secret
 
 ```bash
-flutter run -d macos --dart-define=GEMINI_API_KEY=your_key
+firebase functions:secrets:set GEMINI_API_KEY
 ```
 
-**Model name:** `lib/gemini_quackers_service.dart` targets
-`gemini-3.5-flash-lite`. If the assistant returns a 404, check the current model
-list at <https://ai.google.dev/gemini-api/docs/models> and update the `_endpoint`
-constant.
+Paste the key when prompted. It is written to Secret Manager, not to your
+project files. Never put it in `index.js` or commit it.
+
+## 5.3 Deploy
+
+```bash
+cd functions && npm install && cd ..
+firebase deploy --only functions
+```
+
+First deploy takes a few minutes and will ask to enable some Google Cloud APIs;
+say yes. It also asks to grant the function access to the secret.
+
+Verify it landed:
+
+```bash
+firebase functions:list
+```
+
+You want `askQuackers` in `us-central1`.
+
+## 5.4 Deploy the updated rules
+
+The rules now include the `rateLimits` collection used by the function:
+
+```bash
+firebase deploy --only firestore:rules
+```
+
+## 5.5 Try it
+
+Run the app, open Quackers, ask it something. To watch it work:
+
+```bash
+firebase functions:log --only askQuackers
+```
+
+---
+
+# How the proxy works
+
+```
+App  --(question + Firebase ID token)-->  askQuackers  --(question + key)-->  Gemini
+                                               |
+                                          Secret Manager
+```
+
+The app sends a question. It never sends, stores, or holds a credential. The
+function:
+
+1. **Rejects anyone not signed in.** One key now serves every user, so an
+   unauthenticated endpoint would be a free Gemini relay for the internet.
+2. **Validates input** - rejects empty questions, caps them at 2000 characters,
+   trims context to 8000, and forwards only the last 20 turns.
+3. **Rate limits per account** - 30 requests per 10 minutes, counted in
+   `rateLimits/{uid}` inside a transaction so simultaneous calls cannot both
+   slip past. Tune the constants at the top of `functions/rateLimit.js`.
+4. **Keeps upstream errors private** - the real Gemini error goes to the
+   function log; the app gets a safe message.
+
+The `rateLimits` collection is written only by the Admin SDK, which bypasses
+security rules. `firestore.rules` denies all client access to it, so nobody can
+reset their own allowance.
+
+## Changing the model
+
+The model id is a deployment parameter, not a code change:
+
+```bash
+firebase deploy --only functions --force
+```
+
+with `GEMINI_MODEL` set in `functions/.env`, for example:
+
+```
+GEMINI_MODEL=gemini-2.5-flash-lite
+```
+
+If the assistant reports that the configured model was not found, check the
+current list at <https://ai.google.dev/gemini-api/docs/models>.
+
+## Cleaning up the old keys
+
+Keys entered before the proxy existed are still sitting in Firestore. Delete
+them: **Firestore Database -> `users` collection -> each user document ->
+`private/settings`**. Nothing reads that path any more, and the rules no longer
+grant access to it, but the values are still there until removed.
+
+Rotate the key itself too (5.1) - anything that sat in plaintext should be
+replaced rather than reused.
+
+## Running the function tests
+
+The rate limit logic is pure and unit tested, no emulator required:
+
+```bash
+cd functions && npm test
+```
+
+## If you would rather not use Blaze
+
+Revert to commit `569f023`, the last one before the proxy. That version asks
+each user for their own Gemini API key and stores it in Firestore - it works on
+the free plan, at the cost of the key being readable by project admins.

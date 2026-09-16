@@ -1,1 +1,42 @@
-{"firestore":{"rules":"firestore.rules"},"flutter":{"platforms":{"ios":{"default":{"projectId":"ocean-list","appId":"1:978597685925:ios:f7b879190b44fca2dffb4c","uploadDebugSymbols":false,"fileOutput":"ios/Runner/GoogleService-Info.plist"}},"macos":{"default":{"projectId":"ocean-list","appId":"1:978597685925:ios:f7b879190b44fca2dffb4c","uploadDebugSymbols":false,"fileOutput":"macos/Runner/GoogleService-Info.plist"}},"dart":{"lib/firebase_options.dart":{"projectId":"ocean-list","configurations":{"ios":"1:978597685925:ios:f7b879190b44fca2dffb4c","macos":"1:978597685925:ios:f7b879190b44fca2dffb4c","web":"1:978597685925:web:d1ad1bf1634bceacdffb4c"}}}}}}
+{
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "flutter": {
+    "platforms": {
+      "ios": {
+        "default": {
+          "projectId": "ocean-list",
+          "appId": "1:978597685925:ios:f7b879190b44fca2dffb4c",
+          "uploadDebugSymbols": false,
+          "fileOutput": "ios/Runner/GoogleService-Info.plist"
+        }
+      },
+      "macos": {
+        "default": {
+          "projectId": "ocean-list",
+          "appId": "1:978597685925:ios:f7b879190b44fca2dffb4c",
+          "uploadDebugSymbols": false,
+          "fileOutput": "macos/Runner/GoogleService-Info.plist"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "ocean-list",
+          "configurations": {
+            "ios": "1:978597685925:ios:f7b879190b44fca2dffb4c",
+            "macos": "1:978597685925:ios:f7b879190b44fca2dffb4c",
+            "web": "1:978597685925:web:d1ad1bf1634bceacdffb4c"
+          }
+        }
+      }
+    }
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "predeploy": []
+    }
+  ]
+}

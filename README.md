@@ -33,9 +33,12 @@ Other targets: `-d chrome`, `-d ios`. There is no `android/` folder yet; run
 flutter test
 ```
 
-24 tests covering the Firestore repositories (against `fake_cloud_firestore`),
+22 Dart tests covering the Firestore repository (against `fake_cloud_firestore`),
 the login form (against `firebase_auth_mocks`), and the unconfigured-Firebase
 startup path. None of them need a live Firebase project.
+
+The function has its own tests (`cd functions && npm test`, 8 cases covering the
+rate limit window logic) which need no emulator.
 
 ## Layout
 
@@ -51,18 +54,19 @@ lib/
   data/
     models.dart                    TaskItem, TaskListData, DatedTask
     planner_repository.dart        lists + tasks CRUD and streams
-    user_settings_repository.dart  per-user Gemini API key
   widgets/
     ocean_background.dart          animated background, capybara, painters
+functions/
+  index.js                         askQuackers -- the Gemini proxy
+  rateLimit.js                     per-user throttle (pure, unit tested)
 firestore.rules                    security rules -- must be deployed
 ```
 
 ## The Gemini key
 
-Entered once by the signed-in user (account menu → **Add Gemini API key**) and
-saved to their Firestore settings document, so it is not re-entered on the next
-launch or on another device. See the security note at the end of
-SETUP.md for what that does and does not protect.
+There isn't one in the app. Quackers calls the `askQuackers` Cloud Function
+(`functions/index.js`), which holds the key in Secret Manager and never sends it
+to the client. The function requires a signed-in caller and rate limits per
+account, since one key serves every user.
 
-The build-time `--dart-define=GEMINI_API_KEY=...` path still works as a fallback
-when no key is saved to the account.
+Deploying it needs the Blaze plan - see Part 5 of [SETUP.md](SETUP.md).
