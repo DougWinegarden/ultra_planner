@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../widgets/app_background.dart';
+import '../widgets/holiday_theme.dart';
 import '../widgets/ocean_background.dart';
 import 'auth_service.dart';
 
@@ -145,7 +147,11 @@ class _LoginPageState extends State<LoginPage> {
       backgroundColor: Colors.transparent,
       body: Stack(
         children: <Widget>[
-          const Positioned.fill(child: AnimatedOceanBackground()),
+          Positioned.fill(
+            child: AnimatedAppBackground(
+              theme: HolidayTheme.forDate(DateTime.now()),
+            ),
+          ),
           SafeArea(
             child: Center(
               child: SingleChildScrollView(

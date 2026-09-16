@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 
 import '../firebase_options.dart';
 import '../main.dart' show OceanListsPage;
+import '../widgets/app_background.dart';
+import '../widgets/holiday_theme.dart';
 import '../widgets/ocean_background.dart';
 import 'auth_service.dart';
 import 'login_page.dart';
@@ -80,7 +82,11 @@ class _OceanLoadingScreen extends StatelessWidget {
       backgroundColor: Colors.transparent,
       body: Stack(
         children: <Widget>[
-          const Positioned.fill(child: AnimatedOceanBackground()),
+          Positioned.fill(
+            child: AnimatedAppBackground(
+              theme: HolidayTheme.forDate(DateTime.now()),
+            ),
+          ),
           Center(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -122,7 +128,11 @@ class SetupNoticeScreen extends StatelessWidget {
       backgroundColor: Colors.transparent,
       body: Stack(
         children: <Widget>[
-          const Positioned.fill(child: AnimatedOceanBackground()),
+          Positioned.fill(
+            child: AnimatedAppBackground(
+              theme: HolidayTheme.forDate(DateTime.now()),
+            ),
+          ),
           SafeArea(
             child: Center(
               child: SingleChildScrollView(

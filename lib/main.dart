@@ -15,6 +15,8 @@ import 'data/planner_repository.dart';
 import 'data/us_holidays.dart';
 import 'firebase_options.dart';
 import 'gemini_quackers_service.dart';
+import 'widgets/app_background.dart';
+import 'widgets/holiday_theme.dart';
 import 'widgets/ocean_background.dart';
 
 //hello this is a test
@@ -116,6 +118,10 @@ class _OceanListsPageState extends State<OceanListsPage> {
 
   bool _isLoading = true;
   String? _loadError;
+
+  /// Theme for the day currently in focus. Driven by [_calendarDate] rather
+  /// than today, so selecting Halloween in the calendar previews its look.
+  HolidayTheme get _theme => HolidayTheme.forDate(_calendarDate);
 
   /// Last four characters of the saved Gemini key, or null when none is set.
   /// The key itself never reaches the client.
@@ -834,7 +840,7 @@ class _OceanListsPageState extends State<OceanListsPage> {
       backgroundColor: Colors.transparent,
       body: Stack(
         children: <Widget>[
-          const Positioned.fill(child: AnimatedOceanBackground()),
+          Positioned.fill(child: AnimatedAppBackground(theme: _theme)),
           SafeArea(
             child: Column(
               children: <Widget>[
@@ -857,8 +863,8 @@ class _OceanListsPageState extends State<OceanListsPage> {
                   _addTask();
                 }
               },
-              backgroundColor: const Color(0xFF0077B6),
-              foregroundColor: Colors.white,
+              backgroundColor: _theme.accent,
+              foregroundColor: _theme.onAccent,
               icon: const Icon(Icons.add),
               label: Text(
                 _section == AppSection.calendar
@@ -972,13 +978,13 @@ class _OceanListsPageState extends State<OceanListsPage> {
       padding: const EdgeInsets.fromLTRB(16, 12, 10, 4),
       child: Row(
         children: <Widget>[
-          const Icon(Icons.water_drop, color: Color(0xFF005F8F), size: 30),
+          Icon(Icons.water_drop, color: _theme.subheading, size: 30),
           const SizedBox(width: 8),
-          const Expanded(
+          Expanded(
             child: Text(
-              'Ocean Lists',
+              _theme.isOcean ? 'Ocean Lists' : _theme.name,
               style: TextStyle(
-                color: Color(0xFF003B5C),
+                color: _theme.heading,
                 fontSize: 26,
                 fontWeight: FontWeight.bold,
               ),
@@ -1077,7 +1083,7 @@ class _OceanListsPageState extends State<OceanListsPage> {
       ],
       child: CircleAvatar(
         radius: 17,
-        backgroundColor: const Color(0xFF0077B6),
+        backgroundColor: _theme.accent,
         child: Text(
           initial,
           style: const TextStyle(
@@ -1576,18 +1582,21 @@ class _OceanListsPageState extends State<OceanListsPage> {
         spacing: 10,
         runSpacing: 6,
         alignment: WrapAlignment.center,
-        children: const <Widget>[
+        children: <Widget>[
           CalendarLegendDot(
             color: TaskStatusColors.unfinished,
             label: 'Unfinished',
+            textColor: _theme.subheading,
           ),
           CalendarLegendDot(
             color: TaskStatusColors.finished,
             label: 'Finished',
+            textColor: _theme.subheading,
           ),
           CalendarLegendDot(
             color: TaskStatusColors.overdue,
             label: '🌊 Tsunami overdue',
+            textColor: _theme.subheading,
           ),
         ],
       ),
@@ -1707,17 +1716,20 @@ class _OceanListsPageState extends State<OceanListsPage> {
         'month-${_calendarDate.year}-${_calendarDate.month}',
       ),
       children: <Widget>[
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 16),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Row(
             children: <Widget>[
-              CalendarWeekdayLabel('Sun'),
-              CalendarWeekdayLabel('Mon'),
-              CalendarWeekdayLabel('Tue'),
-              CalendarWeekdayLabel('Wed'),
-              CalendarWeekdayLabel('Thu'),
-              CalendarWeekdayLabel('Fri'),
-              CalendarWeekdayLabel('Sat'),
+              for (final String day in <String>[
+                'Sun',
+                'Mon',
+                'Tue',
+                'Wed',
+                'Thu',
+                'Fri',
+                'Sat',
+              ])
+                CalendarWeekdayLabel(day, color: _theme.subheading),
             ],
           ),
         ),
@@ -2009,10 +2021,12 @@ class CalendarLegendDot extends StatelessWidget {
     super.key,
     required this.color,
     required this.label,
+    required this.textColor,
   });
 
   final Color color;
   final String label;
+  final Color textColor;
 
   @override
   Widget build(BuildContext context) {
@@ -2030,8 +2044,8 @@ class CalendarLegendDot extends StatelessWidget {
         const SizedBox(width: 5),
         Text(
           label,
-          style: const TextStyle(
-            color: Color(0xFF174E68),
+          style: TextStyle(
+            color: textColor,
             fontSize: 12,
             fontWeight: FontWeight.w600,
           ),
@@ -2446,9 +2460,10 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
 }
 
 class CalendarWeekdayLabel extends StatelessWidget {
-  const CalendarWeekdayLabel(this.label, {super.key});
+  const CalendarWeekdayLabel(this.label, {super.key, required this.color});
 
   final String label;
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
@@ -2456,8 +2471,8 @@ class CalendarWeekdayLabel extends StatelessWidget {
       child: Text(
         label,
         textAlign: TextAlign.center,
-        style: const TextStyle(
-          color: Color(0xFF005F8F),
+        style: TextStyle(
+          color: color,
           fontSize: 11,
           fontWeight: FontWeight.bold,
         ),
