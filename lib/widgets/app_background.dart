@@ -54,6 +54,29 @@ class _AnimatedAppBackgroundState extends State<AnimatedAppBackground>
   }
 }
 
+/// Where a drifter sits along its lane, and which way it is facing.
+///
+/// [leg] runs 0 (far left) to 1 (far right). The sprite crosses, turns around
+/// off-screen, and comes back, so this is a triangle wave rather than a saw.
+///
+/// [facingRight] is derived from the direction of travel and nothing else, so a
+/// sprite can never moonwalk. [startReversed] only shifts the phase, setting
+/// which way the lane sets off; it must not touch the facing.
+({double leg, bool facingRight}) drifterMotion({
+  required double progress,
+  required double offset,
+  required bool startReversed,
+}) {
+  final double phase =
+      (progress + offset + (startReversed ? 0.5 : 0.0)) % 1.0;
+  final bool movingRight = phase < 0.5;
+
+  return (
+    leg: movingRight ? phase * 2 : (1 - phase) * 2,
+    facingRight: movingRight,
+  );
+}
+
 class AppBackgroundPainter extends CustomPainter {
   const AppBackgroundPainter({required this.progress, required this.theme});
 
@@ -219,22 +242,23 @@ class AppBackgroundPainter extends CustomPainter {
       final Color colour =
           theme.drifterColors[i % theme.drifterColors.length];
 
-      // Back and forth: the sprite crosses, turns, and crosses back, so a
-      // triangle wave rather than a saw.
-      final double cycle = (progress + lane.offset) % 1.0;
-      final bool goingRight = cycle < 0.5;
-      final double leg = goingRight ? cycle * 2 : (1 - cycle) * 2;
+      final ({double leg, bool facingRight}) motion = drifterMotion(
+        progress: progress,
+        offset: lane.offset,
+        startReversed: lane.reverse,
+      );
 
       final double span = size.width + lane.size * 3;
-      final double x = -lane.size * 1.5 + span * leg;
+      final double x = -lane.size * 1.5 + span * motion.leg;
       final double bob =
           math.sin(progress * math.pi * 6 + lane.offset * 7) * lane.size * 0.12;
       final double y = size.height * lane.y + bob;
 
       canvas.save();
       canvas.translate(x, y);
-      // Sprites are drawn facing right; flip when travelling the other way.
-      if (!goingRight != lane.reverse) {
+      // Every sprite is drawn facing right, so mirror it when heading left.
+      // The turn happens past the edge of the screen, so it is never seen.
+      if (!motion.facingRight) {
         canvas.scale(-1, 1);
       }
       _paintSprite(canvas, lane.size, colour, i);
