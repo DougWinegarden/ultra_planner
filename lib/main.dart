@@ -10,7 +10,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'auth/auth_gate.dart';
 import 'auth/auth_service.dart';
 import 'data/models.dart';
+import 'data/calendar_layout.dart';
 import 'data/planner_repository.dart';
+import 'data/us_holidays.dart';
 import 'firebase_options.dart';
 import 'gemini_quackers_service.dart';
 import 'widgets/ocean_background.dart';
@@ -54,6 +56,26 @@ class OceanListsApp extends StatelessWidget {
       home: AuthGate(startupError: startupError),
     );
   }
+}
+
+/// Task status colours, used everywhere a task's state is shown so the same
+/// task reads the same way in the list, the calendar and the legend.
+///
+/// Chosen dark enough to stay legible as text and icons on the app's pale
+/// background; a literal lemon yellow would wash out.
+abstract final class TaskStatusColors {
+  /// Not done, not yet late.
+  static const Color unfinished = Color(0xFFD99400);
+
+  /// Completed.
+  static const Color finished = Color(0xFF1B8A3F);
+
+  /// Past its due date and still not done.
+  static const Color overdue = Color(0xFFCC2A22);
+
+  /// Soft fills for card backgrounds, tinted from the colours above.
+  static const Color finishedSurface = Color(0xFFE4F5E8);
+  static const Color overdueSurface = Color(0xFFFDEAE8);
 }
 
 enum AppSection { lists, calendar }
@@ -687,12 +709,12 @@ class _OceanListsPageState extends State<OceanListsPage> {
 
   Color _taskColor(TaskItem task) {
     if (_isOverdue(task)) {
-      return const Color(0xFF006994);
+      return TaskStatusColors.overdue;
     }
     if (task.isDone) {
-      return const Color(0xFF023E8A);
+      return TaskStatusColors.finished;
     }
-    return const Color(0xFF00BCD4);
+    return TaskStatusColors.unfinished;
   }
 
   void _goToToday() {
@@ -1341,15 +1363,19 @@ class _OceanListsPageState extends State<OceanListsPage> {
       child: Card(
         margin: const EdgeInsets.only(bottom: 10),
         color: task.isDone
-            ? const Color(0xFFD8E5FA).withValues(alpha: 0.97)
+            ? TaskStatusColors.finishedSurface.withValues(alpha: 0.97)
             : overdue
-            ? const Color(0xFFD7F4FF).withValues(alpha: 0.97)
+            ? TaskStatusColors.overdueSurface.withValues(alpha: 0.97)
             : Colors.white.withValues(alpha: 0.93),
         elevation: 1,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(18),
           side: BorderSide(
-            color: overdue ? const Color(0xFF006994) : const Color(0xFF90E0EF),
+            color: overdue
+                ? TaskStatusColors.overdue
+                : task.isDone
+                ? TaskStatusColors.finished
+                : const Color(0xFF90E0EF),
             width: overdue ? 2 : 1,
           ),
         ),
@@ -1359,11 +1385,15 @@ class _OceanListsPageState extends State<OceanListsPage> {
               const SizedBox(
                 height: 17,
                 width: double.infinity,
-                child: CustomPaint(painter: TsunamiStripPainter()),
+                child: CustomPaint(
+                  painter: TsunamiStripPainter(
+                    color: TaskStatusColors.overdue,
+                  ),
+                ),
               ),
             CheckboxListTile(
               value: task.isDone,
-              activeColor: const Color(0xFF023E8A),
+              activeColor: TaskStatusColors.finished,
               controlAffinity: ListTileControlAffinity.leading,
               onChanged: (bool? value) {
                 final bool isDone = value ?? false;
@@ -1399,7 +1429,7 @@ class _OceanListsPageState extends State<OceanListsPage> {
                         : 'Due: ${_formatDate(task.dueDate!)}',
                     style: TextStyle(
                       color: overdue
-                          ? const Color(0xFF006994)
+                          ? TaskStatusColors.overdue
                           : const Color(0xFF28789D),
                       fontWeight: overdue ? FontWeight.bold : FontWeight.normal,
                     ),
@@ -1543,10 +1573,16 @@ class _OceanListsPageState extends State<OceanListsPage> {
         runSpacing: 6,
         alignment: WrapAlignment.center,
         children: const <Widget>[
-          CalendarLegendDot(color: Color(0xFF00BCD4), label: 'Unfinished'),
-          CalendarLegendDot(color: Color(0xFF023E8A), label: 'Finished'),
           CalendarLegendDot(
-            color: Color(0xFF006994),
+            color: TaskStatusColors.unfinished,
+            label: 'Unfinished',
+          ),
+          CalendarLegendDot(
+            color: TaskStatusColors.finished,
+            label: 'Finished',
+          ),
+          CalendarLegendDot(
+            color: TaskStatusColors.overdue,
             label: '🌊 Tsunami overdue',
           ),
         ],
@@ -1614,18 +1650,22 @@ class _OceanListsPageState extends State<OceanListsPage> {
                 ),
                 const Spacer(),
                 _yearCountRow(
-                  const Color(0xFF00BCD4),
+                  TaskStatusColors.unfinished,
                   unfinished,
                   Icons.pending_actions,
                 ),
                 const SizedBox(height: 4),
                 _yearCountRow(
-                  const Color(0xFF023E8A),
+                  TaskStatusColors.finished,
                   finished,
                   Icons.task_alt,
                 ),
                 const SizedBox(height: 4),
-                _yearCountRow(const Color(0xFF006994), overdue, Icons.waves),
+                _yearCountRow(
+                  TaskStatusColors.overdue,
+                  overdue,
+                  Icons.waves,
+                ),
               ],
             ),
           ),
@@ -1653,14 +1693,9 @@ class _OceanListsPageState extends State<OceanListsPage> {
       _calendarDate.month,
       1,
     );
-    final int daysInMonth = DateTime(
-      _calendarDate.year,
-      _calendarDate.month + 1,
-      0,
-    ).day;
-    final int leadingEmptyDays = firstDay.weekday - 1;
-    final int cellCount = leadingEmptyDays + daysInMonth;
-    final int rowCount = (cellCount / 7).ceil();
+    final int monthLength = daysInMonth(firstDay);
+    final int leadingEmptyDays = leadingBlankDays(firstDay);
+    final int rowCount = weekRowsInMonth(firstDay);
     final int totalCells = rowCount * 7;
 
     return Column(
@@ -1672,13 +1707,13 @@ class _OceanListsPageState extends State<OceanListsPage> {
           padding: EdgeInsets.symmetric(horizontal: 16),
           child: Row(
             children: <Widget>[
+              CalendarWeekdayLabel('Sun'),
               CalendarWeekdayLabel('Mon'),
               CalendarWeekdayLabel('Tue'),
               CalendarWeekdayLabel('Wed'),
               CalendarWeekdayLabel('Thu'),
               CalendarWeekdayLabel('Fri'),
               CalendarWeekdayLabel('Sat'),
-              CalendarWeekdayLabel('Sun'),
             ],
           ),
         ),
@@ -1696,7 +1731,7 @@ class _OceanListsPageState extends State<OceanListsPage> {
             itemBuilder: (BuildContext context, int index) {
               final int dayNumber = index - leadingEmptyDays + 1;
 
-              if (dayNumber < 1 || dayNumber > daysInMonth) {
+              if (dayNumber < 1 || dayNumber > monthLength) {
                 return const SizedBox.shrink();
               }
 
@@ -1714,6 +1749,7 @@ class _OceanListsPageState extends State<OceanListsPage> {
 
               final bool selected = _isSameDay(date, _calendarDate);
               final bool today = _isSameDay(date, DateTime.now());
+              final Holiday? holiday = UsHolidays.primaryOn(date);
 
               return InkWell(
                 borderRadius: BorderRadius.circular(12),
@@ -1740,15 +1776,33 @@ class _OceanListsPageState extends State<OceanListsPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      Text(
-                        '$dayNumber',
-                        style: TextStyle(
-                          color: today
-                              ? const Color(0xFF0077B6)
-                              : const Color(0xFF003B5C),
-                          fontWeight: FontWeight.bold,
-                          fontSize: 12,
-                        ),
+                      Row(
+                        children: <Widget>[
+                          Text(
+                            '$dayNumber',
+                            style: TextStyle(
+                              color: today
+                                  ? const Color(0xFF0077B6)
+                                  : holiday != null
+                                  ? const Color(0xFF9A3412)
+                                  : const Color(0xFF003B5C),
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                          ),
+                          if (holiday != null) ...<Widget>[
+                            const Spacer(),
+                            // Emoji where the holiday has one, otherwise a dot,
+                            // so civic observances are still marked.
+                            Tooltip(
+                              message: holiday.name,
+                              child: Text(
+                                holiday.emoji ?? '•',
+                                style: const TextStyle(fontSize: 11),
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
                       const SizedBox(height: 2),
                       Expanded(
@@ -1783,7 +1837,7 @@ class _OceanListsPageState extends State<OceanListsPage> {
                           alignment: Alignment.bottomRight,
                           child: Icon(
                             Icons.waves,
-                            color: Color(0xFF006994),
+                            color: TaskStatusColors.overdue,
                             size: 13,
                           ),
                         ),
@@ -1799,6 +1853,65 @@ class _OceanListsPageState extends State<OceanListsPage> {
   }
 
   Widget _buildDayView() {
+    final List<Holiday> holidays = UsHolidays.on(_calendarDate);
+
+    return Column(
+      children: <Widget>[
+        if (holidays.isNotEmpty) _buildHolidayBanner(holidays),
+        Expanded(child: _buildDayContent()),
+      ],
+    );
+  }
+
+  /// Names the day's observances above the task list.
+  ///
+  /// Warm tones rather than the app's blues, so a holiday reads as something
+  /// about the day itself rather than another task status.
+  Widget _buildHolidayBanner(List<Holiday> holidays) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF3D6),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE8C77A)),
+      ),
+      child: Row(
+        children: <Widget>[
+          Text(
+            holidays.first.emoji ?? '📅',
+            style: const TextStyle(fontSize: 20),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Text(
+                  // Two can share a day, e.g. Juneteenth and Father's Day.
+                  holidays.map((Holiday h) => h.name).join(' · '),
+                  style: const TextStyle(
+                    color: Color(0xFF7A4B00),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15,
+                  ),
+                ),
+                if (holidays.any((Holiday h) => h.isFederal))
+                  const Text(
+                    'Federal holiday',
+                    style: TextStyle(color: Color(0xFF9A6B1F), fontSize: 12),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDayContent() {
     final List<DatedTask> dayTasks = _allDatedTasks.where((DatedTask item) {
       return _isSameDay(item.task.dueDate!, _calendarDate);
     }).toList();

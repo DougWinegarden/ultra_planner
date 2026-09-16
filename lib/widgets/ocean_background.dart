@@ -75,7 +75,11 @@ class DuckSuitCapybaraPainter extends CustomPainter {
 }
 
 class TsunamiStripPainter extends CustomPainter {
-  const TsunamiStripPainter();
+  /// [color] is passed in rather than fixed so the strip matches whatever the
+  /// app uses for "overdue" -- it marks a late task, not the sea.
+  const TsunamiStripPainter({this.color = const Color(0xFFCC2A22)});
+
+  final Color color;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -85,7 +89,7 @@ class TsunamiStripPainter extends CustomPainter {
     );
 
     final Paint paint = Paint()
-      ..color = const Color(0xFF006994)
+      ..color = color
       ..style = PaintingStyle.fill;
 
     final Path path = Path()..moveTo(0, size.height);
@@ -137,7 +141,9 @@ class TsunamiStripPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant TsunamiStripPainter oldDelegate) => false;
+  bool shouldRepaint(covariant TsunamiStripPainter oldDelegate) {
+    return oldDelegate.color != color;
+  }
 }
 
 class AnimatedOceanBackground extends StatefulWidget {
