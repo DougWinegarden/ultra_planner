@@ -241,10 +241,10 @@ You'll get two starter lists ("School" and "Shopping") on first sign-in.
 
 ## 4.2 The assistant
 
-Quackers needs the Cloud Function from **Part 5** before it will reply. Nothing
-is entered in the app -- the key is deployed once and serves every user.
+Quackers needs the Cloud Functions from **Part 5**, plus your own Gemini API key
+entered in the app once Part 5 is deployed.
 
-Everything else (lists, tasks, the calendar) works without it.
+Everything else -- lists, tasks, the calendar -- works without it.
 
 ---
 
@@ -255,9 +255,10 @@ Everything else (lists, tasks, the calendar) works without it.
 - [ ] Adding a task makes it appear in the Firebase console under
       **Firestore Database → tasks**
 - [ ] Logging out and back in shows your tasks again
-- [ ] Quackers replies when you ask it something
+- [ ] Quackers replies once you add your Gemini key (needs Part 5)
+- [ ] `users/{uid}/private/settings` in the console shows ciphertext, not a key
 - [ ] `flutter test` passes (22 tests)
-- [ ] `cd functions && npm test` passes (8 tests)
+- [ ] `cd functions && npm test` passes (20 tests)
 
 ---
 
@@ -315,66 +316,75 @@ in the calendar.
 
 ---
 
-# Part 5 - Deploy the Quackers Cloud Function
+# Part 5 - Deploy the Quackers Cloud Functions
 
-Quackers talks to Gemini through a Cloud Function. The API key lives in Google
-Secret Manager and is read only inside that function, so it never reaches the
-app. Users do not enter a key, and there is no key stored in Firestore for
-anyone to read.
+Quackers reaches Gemini through Cloud Functions. **Each user brings their own
+Gemini key.** The key is encrypted before it is stored, so it is never sitting
+in plaintext in Firestore and is never sent back to the app.
 
 > **This part requires the Blaze plan.** Cloud Functions cannot be deployed on
-> the free Spark plan. Blaze is pay-as-you-go with a generous free tier (2M
-> function invocations/month), but it needs a card on file. Upgrade at
-> **Firebase console -> the gear icon -> Usage and billing -> Modify plan**.
+> the free Spark plan. Everything in Parts 1-4 works on Spark; only the
+> assistant needs this.
 >
-> Everything in Parts 1-4 works on Spark. Only the assistant needs this.
+> Costs for a class-sized project land inside Blaze's free tier (2M function
+> invocations/month). Gemini usage is billed to each user's own key, not to
+> this project. Setting a budget alert is still worth doing:
+> **console -> gear icon -> Usage and billing -> Details & settings.**
 
-## 5.1 Get a Gemini API key
+## 5.1 Create the encryption key
 
-<https://aistudio.google.com/apikey>
-
-If you previously pasted a key into the app, **generate a new one and delete the
-old one**. The old key was stored in plaintext in Firestore and should be
-treated as compromised.
-
-## 5.2 Store the key as a secret
+This is the master key that encrypts every user's Gemini key. It is *not* a
+Gemini key -- it is 32 random bytes you generate yourself:
 
 ```bash
-firebase functions:secrets:set GEMINI_API_KEY
+openssl rand -base64 32
 ```
 
-Paste the key when prompted. It is written to Secret Manager, not to your
-project files. Never put it in `index.js` or commit it.
+Store it as a secret:
 
-## 5.3 Deploy
+```bash
+firebase functions:secrets:set GEMINI_KEY_ENCRYPTION_KEY
+```
+
+Paste the generated value when prompted.
+
+> Keep a copy somewhere safe. **Rotating or losing this invalidates every stored
+> key** and each user has to enter theirs again. Nothing else breaks.
+
+## 5.2 Deploy
 
 ```bash
 cd functions && npm install && cd ..
 firebase deploy --only functions
 ```
 
-First deploy takes a few minutes and will ask to enable some Google Cloud APIs;
-say yes. It also asks to grant the function access to the secret.
+First deploy takes a few minutes, asks to enable some Google Cloud APIs, and
+asks to grant the functions access to the secret. Say yes to all.
 
-Verify it landed:
+Verify:
 
 ```bash
 firebase functions:list
 ```
 
-You want `askQuackers` in `us-central1`.
+You want four functions in `us-central1`: `askQuackers`, `saveGeminiKey`,
+`quackersStatus`, `deleteGeminiKey`.
 
-## 5.4 Deploy the updated rules
-
-The rules now include the `rateLimits` collection used by the function:
+## 5.3 Deploy the updated rules
 
 ```bash
 firebase deploy --only firestore:rules
 ```
 
-## 5.5 Try it
+## 5.4 Each user adds their own key
 
-Run the app, open Quackers, ask it something. To watch it work:
+In the app: **avatar menu -> Add Gemini API key**, or open Quackers and use the
+setup panel. Free keys come from <https://aistudio.google.com/apikey>.
+
+Entered once per account, not per device -- it is stored server-side and
+follows the login.
+
+Watch it work:
 
 ```bash
 firebase functions:log --only askQuackers
@@ -382,68 +392,86 @@ firebase functions:log --only askQuackers
 
 ---
 
-# How the proxy works
+# How the key is protected
 
 ```
-App  --(question + Firebase ID token)-->  askQuackers  --(question + key)-->  Gemini
-                                               |
-                                          Secret Manager
+App --(key, once, over TLS)--> saveGeminiKey --encrypt--> Firestore (ciphertext)
+
+App --(question)--> askQuackers --decrypt--> Gemini
+                         |
+                  master key (Secret Manager)
 ```
 
-The app sends a question. It never sends, stores, or holds a credential. The
-function:
+The key is encrypted with **AES-256-GCM** using a master key held in Secret
+Manager, with a fresh random IV per key so no two records share one.
 
-1. **Rejects anyone not signed in.** One key now serves every user, so an
-   unauthenticated endpoint would be a free Gemini relay for the internet.
-2. **Validates input** - rejects empty questions, caps them at 2000 characters,
-   trims context to 8000, and forwards only the last 20 turns.
-3. **Rate limits per account** - 30 requests per 10 minutes, counted in
-   `rateLimits/{uid}` inside a transaction so simultaneous calls cannot both
-   slip past. Tune the constants at the top of `functions/rateLimit.js`.
-4. **Keeps upstream errors private** - the real Gemini error goes to the
-   function log; the app gets a safe message.
+**What this protects against**
 
-The `rateLimits` collection is written only by the Admin SDK, which bypasses
-security rules. `firestore.rules` denies all client access to it, so nobody can
-reset their own allowance.
+- Browsing Firestore in the console shows ciphertext, not keys
+- A database export or leaked backup is useless on its own
+- Other signed-in users: security rules deny *all* client access to the stored
+  record
+- The app itself: the key is never sent back. The client can ask whether a key
+  exists and see its last four characters, nothing more
+- Tampering: GCM authenticates, so a modified record fails to decrypt instead of
+  silently producing garbage
+
+**What it does not protect against**
+
+Anyone who can read the master secret in Secret Manager can decrypt every stored
+key. A proxy has to recover the plaintext to call Gemini, so this is
+unavoidable. The honest summary: keys are no longer *lying around* in plaintext,
+but a determined project owner can still get at them.
+
+The only design where the operator genuinely cannot read the key is one where
+the key never reaches the server -- which means no proxy, and the key living on
+each device instead.
+
+## What each function does
+
+| Function | Purpose |
+| --- | --- |
+| `saveGeminiKey` | Encrypts and stores the caller's key. Returns only a `...abcd` hint. |
+| `quackersStatus` | Whether a key is saved, plus that hint. Never the key. |
+| `deleteGeminiKey` | Forgets the caller's key. |
+| `askQuackers` | Decrypts the caller's key, calls Gemini, returns the reply. |
+
+All four reject unauthenticated callers. `askQuackers` also validates input
+(2000-char question, 8000-char context, last 20 turns) and rate limits to 30
+requests per 10 minutes per account, counted in `rateLimits/{uid}` inside a
+transaction so simultaneous calls cannot both slip past. Tune the constants in
+`functions/rateLimit.js`.
+
+Gemini errors are logged in full server-side; the app gets a safe message. A
+`400` or `403` from Gemini is reported as a rejected key, which is the one cause
+the user can actually fix.
 
 ## Changing the model
 
-The model id is a deployment parameter, not a code change:
-
-```bash
-firebase deploy --only functions --force
-```
-
-with `GEMINI_MODEL` set in `functions/.env`, for example:
+Set `GEMINI_MODEL` in `functions/.env` and redeploy:
 
 ```
 GEMINI_MODEL=gemini-2.5-flash-lite
 ```
 
-If the assistant reports that the configured model was not found, check the
-current list at <https://ai.google.dev/gemini-api/docs/models>.
+If Quackers reports the configured model was not found, check
+<https://ai.google.dev/gemini-api/docs/models>.
 
-## Cleaning up the old keys
+## Cleaning up old plaintext keys
 
-Keys entered before the proxy existed are still sitting in Firestore. Delete
-them: **Firestore Database -> `users` collection -> each user document ->
-`private/settings`**. Nothing reads that path any more, and the rules no longer
-grant access to it, but the values are still there until removed.
-
-Rotate the key itself too (5.1) - anything that sat in plaintext should be
-replaced rather than reused.
+Keys saved before this change are still in Firestore in the clear, under
+`users/{uid}/private/settings` as a `geminiApiKey` field. Delete that field for
+every user in the console, and have each user re-enter their key so it is stored
+encrypted. Any key that sat in plaintext should be revoked at
+<https://aistudio.google.com/apikey> and replaced rather than reused.
 
 ## Running the function tests
 
-The rate limit logic is pure and unit tested, no emulator required:
+Pure logic, no emulator needed:
 
 ```bash
 cd functions && npm test
 ```
 
-## If you would rather not use Blaze
-
-Revert to commit `569f023`, the last one before the proxy. That version asks
-each user for their own Gemini API key and stores it in Firestore - it works on
-the free plan, at the cost of the key being readable by project admins.
+20 tests: encryption round-trip, tamper detection, IV uniqueness, wrong master
+key, and the rate limit window boundaries.

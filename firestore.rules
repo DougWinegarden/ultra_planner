@@ -34,16 +34,23 @@ service cloud.firestore {
       allow update: if owns(resource.data) && owns(request.resource.data);
     }
 
-    // Per-user rate limit counters for the askQuackers function. Written only
-    // by the Admin SDK inside the function, which bypasses these rules, so no
-    // client may read or tamper with its own allowance.
+    // Per-user rate limit counters for the Quackers functions. Written only by
+    // the Admin SDK inside those functions, which bypasses these rules, so no
+    // client may read or reset its own allowance.
     match /rateLimits/{userId} {
       allow read, write: if false;
     }
 
-    // NOTE: users/{uid}/private/settings held the Gemini API key before the
-    // Cloud Function proxy existed. Nothing reads or writes it now, so it has
-    // no rule and is closed by default. Delete any leftover documents in the
-    // console -- see "Cleaning up the old keys" in SETUP.md.
+    // Encrypted Gemini API keys.
+    //
+    // Denied to every client, including the owner. The key is written only by
+    // saveGeminiKey and read only by askQuackers, both via the Admin SDK. A
+    // client that could read this would get ciphertext rather than a usable
+    // key, but there is no reason to hand it out at all -- the app asks
+    // quackersStatus whether a key exists instead.
+    match /users/{userId}/private/{document} {
+      allow read, write: if false;
+    }
+
   }
 }

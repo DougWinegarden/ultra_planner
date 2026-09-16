@@ -1,14 +1,20 @@
 /**
- * Ocean Lists -- Gemini proxy.
+ * Ocean Lists -- Gemini proxy with per-user API keys.
  *
- * The app used to hold a Gemini API key on the client. That key was readable by
- * anyone with console access and extractable from the running app. This
- * function replaces that: the key lives in Secret Manager, only ever inside the
- * function, and the client sends a question rather than a credential.
+ * Each user brings their own Gemini key. The key is sent once to saveGeminiKey,
+ * encrypted with AES-256-GCM, and stored as ciphertext in Firestore. It is
+ * decrypted only inside askQuackers, for the duration of one Gemini call.
  *
- * Because one key now serves every user, the function requires a signed-in
- * caller and rate limits per account -- otherwise anyone with an account could
- * drain the project's quota.
+ * What this buys over storing the key directly:
+ *   - Firestore holds ciphertext, so the console, an export, or a leaked
+ *     backup shows nothing usable
+ *   - the key is never in the app bundle, on the device, or readable back by
+ *     the client -- the app can ask *whether* a key is set, never what it is
+ *   - security rules deny clients all access to the stored record
+ *
+ * What it does not buy: anyone who can read the master secret can decrypt every
+ * stored key. A proxy has to recover the plaintext to call Gemini, so that is
+ * unavoidable. See crypto.js.
  */
 
 const {onCall, HttpsError} = require("firebase-functions/v2/https");
@@ -16,6 +22,7 @@ const {defineSecret, defineString} = require("firebase-functions/params");
 const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 const {evaluateRateLimit} = require("./rateLimit");
+const {encryptApiKey, decryptApiKey, keyHint} = require("./crypto");
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -24,13 +31,17 @@ const db = admin.firestore();
  * Set with:  firebase functions:secrets:set GEMINI_API_KEY
  * Never commit the value -- it is injected at runtime, not stored in source.
  */
-const GEMINI_API_KEY = defineSecret("GEMINI_API_KEY");
-
 /**
- * Model id, overridable without a code change:
- *   firebase functions:config  is deprecated; set this in .env or via
- *   `firebase deploy` params. Defaults to a current flash-lite model.
+ * Master key used to encrypt every user's Gemini key. Generate and set with:
+ *
+ *   openssl rand -base64 32
+ *   firebase functions:secrets:set GEMINI_KEY_ENCRYPTION_KEY
+ *
+ * Rotating this invalidates every stored key: users re-enter theirs.
  */
+const ENCRYPTION_KEY = defineSecret("GEMINI_KEY_ENCRYPTION_KEY");
+
+/** Model id, overridable via functions/.env without a code change. */
 const GEMINI_MODEL = defineString("GEMINI_MODEL", {
   default: "gemini-2.5-flash-lite",
 });
@@ -113,26 +124,140 @@ function buildContents(conversation, question) {
   return contents;
 }
 
+// --- Stored key access ------------------------------------------------------
+
+/**
+ * Firestore location of one user's encrypted key.
+ *
+ * Clients are denied all access to this path in firestore.rules; only the
+ * Admin SDK inside these functions reads or writes it.
+ *
+ * @param {string} uid Firebase Auth uid.
+ * @return {FirebaseFirestore.DocumentReference} The settings document.
+ */
+function keyDoc(uid) {
+  return db.collection("users").doc(uid).collection("private").doc("settings");
+}
+
+/**
+ * Rejects the call unless it carries a signed-in user.
+ *
+ * @param {object} request The callable request.
+ * @return {string} The caller's uid.
+ */
+function requireUid(request) {
+  if (!request.auth) {
+    throw new HttpsError(
+      "unauthenticated",
+      "Please log in before using Quackers.",
+    );
+  }
+  return request.auth.uid;
+}
+
+// --- Callables --------------------------------------------------------------
+
+/**
+ * Stores the caller's Gemini API key, encrypted.
+ *
+ * The plaintext exists only for the life of this call: it arrives over TLS, is
+ * encrypted, and is never written anywhere in the clear, including logs.
+ */
+exports.saveGeminiKey = onCall(
+  {secrets: [ENCRYPTION_KEY], region: "us-central1", maxInstances: 5},
+  async (request) => {
+    const uid = requireUid(request);
+    const raw = request.data && request.data.apiKey;
+
+    if (typeof raw !== "string" || raw.trim() === "") {
+      throw new HttpsError("invalid-argument", "Enter your Gemini API key.");
+    }
+    const apiKey = raw.trim();
+    if (apiKey.length > 200) {
+      throw new HttpsError(
+        "invalid-argument",
+        "That does not look like a Gemini API key.",
+      );
+    }
+
+    let record;
+    try {
+      record = encryptApiKey(apiKey, ENCRYPTION_KEY.value());
+    } catch (error) {
+      // A misconfigured master key is an operator problem, not a user one.
+      logger.error("Could not encrypt API key", error);
+      throw new HttpsError(
+        "failed-precondition",
+        "The server is not set up to store keys yet. Tell whoever deployed " +
+          "the app to set GEMINI_KEY_ENCRYPTION_KEY.",
+      );
+    }
+
+    await keyDoc(uid).set(
+      {
+        geminiKey: record,
+        geminiKeyHint: keyHint(apiKey),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      {merge: true},
+    );
+
+    return {saved: true, hint: keyHint(apiKey)};
+  },
+);
+
+/**
+ * Reports whether the caller has a key saved, without revealing it.
+ *
+ * Lets the app open straight to the chat or the setup panel instead of finding
+ * out by sending a message that fails.
+ */
+exports.quackersStatus = onCall(
+  {region: "us-central1", maxInstances: 5},
+  async (request) => {
+    const uid = requireUid(request);
+    const snap = await keyDoc(uid).get();
+    const data = snap.exists ? snap.data() : null;
+
+    return {
+      hasKey: Boolean(data && data.geminiKey && data.geminiKey.cipher),
+      // Only ever the last four characters, so the user can tell which key is
+      // saved without the key itself leaving the server.
+      hint: (data && data.geminiKeyHint) || null,
+    };
+  },
+);
+
+/** Removes the caller's stored key. */
+exports.deleteGeminiKey = onCall(
+  {region: "us-central1", maxInstances: 5},
+  async (request) => {
+    const uid = requireUid(request);
+    await keyDoc(uid).set(
+      {
+        geminiKey: admin.firestore.FieldValue.delete(),
+        geminiKeyHint: admin.firestore.FieldValue.delete(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      {merge: true},
+    );
+    return {deleted: true};
+  },
+);
+
+/** Answers a question as Quackers, using the caller's own Gemini key. */
 exports.askQuackers = onCall(
   {
-    secrets: [GEMINI_API_KEY],
+    secrets: [ENCRYPTION_KEY],
     region: "us-central1",
-    // Keeps a single user's burst from spinning up unbounded instances.
+    // Bounded so a runaway client cannot spend the project's budget.
     maxInstances: 10,
     timeoutSeconds: 60,
   },
   async (request) => {
-    // 1. Only signed-in users. This is what stops the key being a free
-    //    for-all now that it is shared.
-    if (!request.auth) {
-      throw new HttpsError(
-        "unauthenticated",
-        "Please log in before chatting with Quackers.",
-      );
-    }
-    const uid = request.auth.uid;
+    const uid = requireUid(request);
 
-    // 2. Validate input before spending quota on it.
+    // 1. Validate input before doing any work on it.
     const data = request.data || {};
     const question = typeof data.question === "string" ?
       data.question.trim() :
@@ -151,10 +276,33 @@ exports.askQuackers = onCall(
       );
     }
 
-    // 3. Per-user throttle.
+    // 2. Throttle per account. Each user spends their own Gemini quota, but
+    //    every call still costs this project a function invocation.
     await enforceRateLimit(uid);
 
-    // 4. Call Gemini. The key is read here and never leaves the function.
+    // 3. Recover this user's key. Plaintext lives only in this scope.
+    const snap = await keyDoc(uid).get();
+    const stored = snap.exists ? snap.data() : null;
+    if (!stored || !stored.geminiKey) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Add your Gemini API key to start chatting with Quackers.",
+      );
+    }
+
+    let apiKey;
+    try {
+      apiKey = decryptApiKey(stored.geminiKey, ENCRYPTION_KEY.value());
+    } catch (error) {
+      // Usually means the master key was rotated out from under stored data.
+      logger.error("Could not decrypt stored key", {uid: uid, error: error});
+      throw new HttpsError(
+        "failed-precondition",
+        "Your saved key could not be read. Please enter it again.",
+      );
+    }
+
+    // 4. Call Gemini.
     const model = GEMINI_MODEL.value();
     const endpoint =
       "https://generativelanguage.googleapis.com/v1beta/models/" +
@@ -166,11 +314,13 @@ exports.askQuackers = onCall(
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-goog-api-key": GEMINI_API_KEY.value(),
+          "x-goog-api-key": apiKey,
         },
         body: JSON.stringify({
           systemInstruction: {
-            parts: [{text: `${SYSTEM_PROMPT}\n\nTASK CONTEXT:\n${taskContext}`}],
+            parts: [
+              {text: `${SYSTEM_PROMPT}\n\nTASK CONTEXT:\n${taskContext}`},
+            ],
           },
           contents: buildContents(data.conversation, question),
           generationConfig: {
@@ -190,13 +340,20 @@ exports.askQuackers = onCall(
     const body = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      // Log the real reason for the developer; return something safe to the
-      // client, since upstream messages can echo request details.
+      // Log the real reason for the operator; hand the user something safe,
+      // since upstream messages can echo request details.
       logger.error("Gemini returned an error", {
         status: response.status,
         body: body,
       });
 
+      if (response.status === 400 || response.status === 403) {
+        // Almost always a bad or revoked key -- the one thing the user can fix.
+        throw new HttpsError(
+          "permission-denied",
+          "Gemini rejected your API key. Check it and enter it again.",
+        );
+      }
       if (response.status === 429 || response.status >= 500) {
         throw new HttpsError(
           "unavailable",

@@ -37,8 +37,9 @@ flutter test
 the login form (against `firebase_auth_mocks`), and the unconfigured-Firebase
 startup path. None of them need a live Firebase project.
 
-The function has its own tests (`cd functions && npm test`, 8 cases covering the
-rate limit window logic) which need no emulator.
+The functions have their own tests (`cd functions && npm test`, 20 cases
+covering encryption round-trip, tamper detection, and rate limit boundaries)
+which need no emulator.
 
 ## Layout
 
@@ -57,16 +58,22 @@ lib/
   widgets/
     ocean_background.dart          animated background, capybara, painters
 functions/
-  index.js                         askQuackers -- the Gemini proxy
+  index.js                         save/status/delete key + askQuackers
+  crypto.js                        AES-256-GCM envelope encryption
   rateLimit.js                     per-user throttle (pure, unit tested)
 firestore.rules                    security rules -- must be deployed
 ```
 
 ## The Gemini key
 
-There isn't one in the app. Quackers calls the `askQuackers` Cloud Function
-(`functions/index.js`), which holds the key in Secret Manager and never sends it
-to the client. The function requires a signed-in caller and rate limits per
-account, since one key serves every user.
+Each user brings their own. It is sent once to the `saveGeminiKey` Cloud
+Function, encrypted with AES-256-GCM under a master key in Secret Manager, and
+stored as ciphertext -- so it is not readable in the Firestore console and is
+never sent back to the app. `askQuackers` decrypts it server-side for the
+duration of one Gemini call.
 
-Deploying it needs the Blaze plan - see Part 5 of [SETUP.md](SETUP.md).
+A project owner who can read the master secret can still decrypt stored keys;
+that is unavoidable for a proxy. See "How the key is protected" in
+[SETUP.md](SETUP.md).
+
+Deploying the functions needs the Blaze plan.

@@ -91,11 +91,17 @@ class _OceanListsPageState extends State<OceanListsPage> {
   bool _isLoading = true;
   String? _loadError;
 
+  /// Last four characters of the saved Gemini key, or null when none is set.
+  /// The key itself never reaches the client.
+  String? _apiKeyHint;
+  bool _hasApiKey = false;
+
   @override
   void initState() {
     super.initState();
     _planner = PlannerRepository(uid: widget.user.uid);
     _subscribeToLists();
+    _refreshKeyStatus();
   }
 
   @override
@@ -134,6 +140,148 @@ class _OceanListsPageState extends State<OceanListsPage> {
         });
       },
     );
+  }
+
+  /// Asks the server whether this account has a key saved.
+  Future<void> _refreshKeyStatus() async {
+    try {
+      final QuackersKeyStatus status = await _quackers.keyStatus();
+      if (!mounted) return;
+      setState(() {
+        _hasApiKey = status.hasKey;
+        _apiKeyHint = status.hint;
+      });
+    } catch (_) {
+      // Not fatal: the assistant falls back to its setup panel on first use.
+    }
+  }
+
+  /// Collects a Gemini key and hands it to the function to be encrypted.
+  Future<void> _showApiKeyDialog() async {
+    final TextEditingController controller = TextEditingController();
+    bool obscured = true;
+
+    final String? key = await showDialog<String>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return StatefulBuilder(
+          builder:
+              (
+                BuildContext context,
+                void Function(void Function()) setDialogState,
+              ) {
+                return AlertDialog(
+                  title: Text(
+                    _hasApiKey ? 'Change Gemini API key' : 'Add Gemini API key',
+                  ),
+                  content: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      if (_apiKeyHint != null) ...<Widget>[
+                        Text(
+                          'Currently saved: $_apiKeyHint',
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: Color(0xFF41708A),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                      ],
+                      const Text(
+                        'Your key is encrypted before it is stored, and is '
+                        'never sent back to this app. Get one free at '
+                        'aistudio.google.com/apikey.',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Color(0xFF41708A),
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      TextField(
+                        controller: controller,
+                        autofocus: true,
+                        obscureText: obscured,
+                        decoration: InputDecoration(
+                          labelText: 'API key',
+                          border: const OutlineInputBorder(),
+                          suffixIcon: IconButton(
+                            tooltip: obscured ? 'Show key' : 'Hide key',
+                            icon: Icon(
+                              obscured
+                                  ? Icons.visibility_outlined
+                                  : Icons.visibility_off_outlined,
+                            ),
+                            onPressed: () =>
+                                setDialogState(() => obscured = !obscured),
+                          ),
+                        ),
+                        onSubmitted: (String value) {
+                          if (value.trim().isNotEmpty) {
+                            Navigator.of(dialogContext).pop(value.trim());
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                  actions: <Widget>[
+                    if (_hasApiKey)
+                      TextButton(
+                        onPressed: () =>
+                            Navigator.of(dialogContext).pop('__delete__'),
+                        child: const Text('Remove key'),
+                      ),
+                    TextButton(
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      child: const Text('Cancel'),
+                    ),
+                    FilledButton(
+                      onPressed: () {
+                        final String value = controller.text.trim();
+                        if (value.isNotEmpty) {
+                          Navigator.of(dialogContext).pop(value);
+                        }
+                      },
+                      child: const Text('Save'),
+                    ),
+                  ],
+                );
+              },
+        );
+      },
+    );
+
+    if (key == null || !mounted) return;
+
+    try {
+      if (key == '__delete__') {
+        await _quackers.deleteApiKey();
+        if (!mounted) return;
+        setState(() {
+          _hasApiKey = false;
+          _apiKeyHint = null;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Gemini key removed.')),
+        );
+        return;
+      }
+
+      final String? hint = await _quackers.saveApiKey(key);
+      if (!mounted) return;
+      setState(() {
+        _hasApiKey = true;
+        _apiKeyHint = hint;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Gemini key saved and encrypted.')),
+      );
+    } on QuackersException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.message)));
+    }
   }
 
   static String _describeFirestoreError(Object error) {
@@ -635,6 +783,11 @@ class _OceanListsPageState extends State<OceanListsPage> {
           suggestedTask: pick?.task.name,
           suggestedTip: _assistantTip,
           userId: widget.user.uid,
+          hasApiKey: _hasApiKey,
+          onSetUpApiKey: () async {
+            await _showApiKeyDialog();
+            return _hasApiKey;
+          },
           onStartSuggestedTask: pick == null
               ? null
               : () {
@@ -841,8 +994,11 @@ class _OceanListsPageState extends State<OceanListsPage> {
       tooltip: 'Account',
       offset: const Offset(0, 44),
       onSelected: (String value) {
-        if (value == 'signout') {
-          _signOut();
+        switch (value) {
+          case 'signout':
+            _signOut();
+          case 'apikey':
+            _showApiKeyDialog();
         }
       },
       itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
@@ -871,6 +1027,18 @@ class _OceanListsPageState extends State<OceanListsPage> {
           ),
         ),
         const PopupMenuDivider(),
+        PopupMenuItem<String>(
+          value: 'apikey',
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.key_outlined, size: 20),
+            title: Text(
+              _hasApiKey ? 'Change Gemini API key' : 'Add Gemini API key',
+            ),
+            subtitle: _apiKeyHint == null ? null : Text(_apiKeyHint!),
+          ),
+        ),
         const PopupMenuItem<String>(
           value: 'signout',
           child: ListTile(
@@ -1750,6 +1918,8 @@ class QuackersChatSheet extends StatefulWidget {
     required this.taskContext,
     required this.suggestedTip,
     required this.userId,
+    required this.hasApiKey,
+    required this.onSetUpApiKey,
     this.suggestedTask,
     this.onStartSuggestedTask,
   });
@@ -1761,6 +1931,12 @@ class QuackersChatSheet extends StatefulWidget {
   /// Scopes locally-cached chat history so two accounts on one device do not
   /// read each other's conversations.
   final String userId;
+
+  /// Whether this account already has a Gemini key stored server-side.
+  final bool hasApiKey;
+
+  /// Opens the key dialog; resolves to whether a key is set afterwards.
+  final Future<bool> Function() onSetUpApiKey;
 
   final String? suggestedTask;
   final VoidCallback? onStartSuggestedTask;
@@ -1778,6 +1954,7 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
   final List<QuackersChatMessage> _messages = <QuackersChatMessage>[];
   bool _isSending = false;
   bool _isLoadingHistory = true;
+  late bool _hasKey = widget.hasApiKey;
 
   @override
   void initState() {
@@ -1816,7 +1993,14 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
       _saveHistory();
     } on QuackersException catch (error) {
       if (!mounted) return;
-      if (error.retryable) {
+      if (error.needsApiKey) {
+        // The saved key is missing or Gemini rejected it; the setup panel is
+        // the only thing the user can act on.
+        setState(() => _hasKey = false);
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.message)));
+      } else if (error.retryable) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
@@ -1953,7 +2137,9 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
                 ],
               ),
               const SizedBox(height: 10),
-              if (_isLoadingHistory)
+              if (!_hasKey)
+                Expanded(child: _buildApiKeySetup())
+              else if (_isLoadingHistory)
                 const Expanded(
                   child: Center(child: CircularProgressIndicator()),
                 )
@@ -2044,6 +2230,53 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
       ),
     );
   }
+
+  /// Shown until this account has a Gemini key stored server-side.
+  Widget _buildApiKeySetup() => Center(
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          const DuckSuitCapybara(size: 84),
+          const SizedBox(height: 14),
+          const Text(
+            'Quackers needs your Gemini key',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF003B5C),
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Get a free key at aistudio.google.com/apikey. It is encrypted '
+            'before it is stored and never sent back to this app, so you only '
+            'enter it once.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 14,
+              height: 1.45,
+              color: Color(0xFF41708A),
+            ),
+          ),
+          const SizedBox(height: 18),
+          FilledButton.icon(
+            onPressed: () async {
+              final bool ready = await widget.onSetUpApiKey();
+              if (ready && mounted) setState(() => _hasKey = true);
+            },
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFF0077B6),
+            ),
+            icon: const Icon(Icons.key_outlined),
+            label: const Text('Add API key'),
+          ),
+        ],
+      ),
+    ),
+  );
 
   Widget _buildWelcome() => Container(
     width: double.infinity,
