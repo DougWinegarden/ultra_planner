@@ -185,11 +185,12 @@ exports.saveGeminiKey = onCall(
       record = encryptApiKey(apiKey, ENCRYPTION_KEY.value());
     } catch (error) {
       // A misconfigured master key is an operator problem, not a user one.
+      // parseMasterKey's messages say which of the two it is and never contain
+      // key material, so they are safe to surface rather than flatten.
       logger.error("Could not encrypt API key", error);
       throw new HttpsError(
         "failed-precondition",
-        "The server is not set up to store keys yet. Tell whoever deployed " +
-          "the app to set GEMINI_KEY_ENCRYPTION_KEY.",
+        `Server setup problem: ${error.message}`,
       );
     }
 
