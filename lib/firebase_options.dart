@@ -66,37 +66,37 @@ class DefaultFirebaseOptions {
 
   // --- Web -----------------------------------------------------------------
   // Console -> Project settings -> Your apps -> Web app -> Config
-  static const FirebaseOptions web = FirebaseOptions(
-    apiKey: kFirebasePlaceholder,
-    appId: kFirebasePlaceholder,
-    messagingSenderId: kFirebasePlaceholder,
-    projectId: kFirebasePlaceholder,
-    authDomain: '$kFirebasePlaceholder.firebaseapp.com',
-    storageBucket: '$kFirebasePlaceholder.firebasestorage.app',
-  );
 
+  static const FirebaseOptions web = FirebaseOptions(
+    apiKey: 'AIzaSyDtgBrwHWNE7LYi3YM2usOjOsBYOtsfbig',
+    appId: '1:978597685925:web:d1ad1bf1634bceacdffb4c',
+    messagingSenderId: '978597685925',
+    projectId: 'ocean-list',
+    authDomain: 'ocean-list.firebaseapp.com',
+    storageBucket: 'ocean-list.firebasestorage.app',
+  );
   // --- macOS ---------------------------------------------------------------
   // Console -> Project settings -> Your apps -> Apple app (macOS bundle id)
+
   static const FirebaseOptions macos = FirebaseOptions(
-    apiKey: kFirebasePlaceholder,
-    appId: kFirebasePlaceholder,
-    messagingSenderId: kFirebasePlaceholder,
-    projectId: kFirebasePlaceholder,
-    storageBucket: '$kFirebasePlaceholder.firebasestorage.app',
+    apiKey: 'AIzaSyAPbA09gHkomsOIr3bDs0FE1Bhlk-UfMQ8',
+    appId: '1:978597685925:ios:f7b879190b44fca2dffb4c',
+    messagingSenderId: '978597685925',
+    projectId: 'ocean-list',
+    storageBucket: 'ocean-list.firebasestorage.app',
     iosBundleId: 'com.example.ultraPlanner',
   );
-
   // --- iOS -----------------------------------------------------------------
   // Console -> Project settings -> Your apps -> Apple app (iOS bundle id)
+
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: kFirebasePlaceholder,
-    appId: kFirebasePlaceholder,
-    messagingSenderId: kFirebasePlaceholder,
-    projectId: kFirebasePlaceholder,
-    storageBucket: '$kFirebasePlaceholder.firebasestorage.app',
+    apiKey: 'AIzaSyAPbA09gHkomsOIr3bDs0FE1Bhlk-UfMQ8',
+    appId: '1:978597685925:ios:f7b879190b44fca2dffb4c',
+    messagingSenderId: '978597685925',
+    projectId: 'ocean-list',
+    storageBucket: 'ocean-list.firebasestorage.app',
     iosBundleId: 'com.example.ultraPlanner',
   );
-
   // --- Android -------------------------------------------------------------
   // Only needed if an android/ folder is added to this project.
   static const FirebaseOptions android = FirebaseOptions(

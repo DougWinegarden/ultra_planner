@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fake_cloud_firestore/fake_cloud_firestore.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -134,5 +136,70 @@ void main() {
 
     expect(afterFirst, 2);
     expect(afterSecond, afterFirst);
+  });
+
+  group('stream stays consistent across updates', () {
+    // Regression: _stitch used to append into the cached TaskListData objects,
+    // so every tasks-only snapshot stacked another copy of every task onto the
+    // previous result. Firestore stayed correct, which is why a refresh looked
+    // fine while adding or deleting duplicated rows on screen.
+
+    test('adding a task does not duplicate the existing ones', () async {
+      final String listId = await repo.createList('School');
+      await repo.addTask(listId: listId, name: 'First');
+
+      final List<List<TaskListData>> seen = <List<TaskListData>>[];
+      final StreamSubscription<List<TaskListData>> sub = repo
+          .watchLists()
+          .listen(seen.add);
+      await pumpEventQueue();
+
+      await repo.addTask(listId: listId, name: 'Second');
+      await pumpEventQueue();
+
+      expect(seen.last.single.tasks.map((TaskItem t) => t.name), <String>[
+        'First',
+        'Second',
+      ]);
+      await sub.cancel();
+    });
+
+    test('deleting a task leaves the survivors intact', () async {
+      final String listId = await repo.createList('School');
+      final String doomed = await repo.addTask(listId: listId, name: 'Doomed');
+      await repo.addTask(listId: listId, name: 'Survivor');
+
+      final List<List<TaskListData>> seen = <List<TaskListData>>[];
+      final StreamSubscription<List<TaskListData>> sub = repo
+          .watchLists()
+          .listen(seen.add);
+      await pumpEventQueue();
+
+      await repo.deleteTask(doomed);
+      await pumpEventQueue();
+
+      expect(seen.last.single.tasks.map((TaskItem t) => t.name), <String>[
+        'Survivor',
+      ]);
+      await sub.cancel();
+    });
+
+    test('many updates in a row do not accumulate copies', () async {
+      final String listId = await repo.createList('School');
+
+      final List<List<TaskListData>> seen = <List<TaskListData>>[];
+      final StreamSubscription<List<TaskListData>> sub = repo
+          .watchLists()
+          .listen(seen.add);
+      await pumpEventQueue();
+
+      for (int i = 0; i < 4; i++) {
+        await repo.addTask(listId: listId, name: 'Task $i');
+        await pumpEventQueue();
+      }
+
+      expect(seen.last.single.tasks, hasLength(4));
+      await sub.cancel();
+    });
   });
 }

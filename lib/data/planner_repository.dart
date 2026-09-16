@@ -82,8 +82,19 @@ class PlannerRepository {
   /// Sorting happens on the client so that neither query needs a composite
   /// Firestore index, which would otherwise have to be deployed by hand.
   List<TaskListData> _stitch(List<TaskListData> lists, List<TaskItem> tasks) {
+    // Rebuild each list instead of reusing the cached instances. `lists` is
+    // held between emissions, so appending into those same objects stacked
+    // another copy of every task onto the previous stitch each time a
+    // tasks-only snapshot arrived: Firestore stayed correct while the UI showed
+    // duplicates until the next full reload.
     final Map<String, TaskListData> byId = <String, TaskListData>{
-      for (final TaskListData list in lists) list.id: list,
+      for (final TaskListData list in lists)
+        list.id: TaskListData(
+          id: list.id,
+          name: list.name,
+          order: list.order,
+          createdAt: list.createdAt,
+        ),
     };
 
     for (final TaskItem task in tasks) {
