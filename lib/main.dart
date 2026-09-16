@@ -78,6 +78,10 @@ abstract final class TaskStatusColors {
   static const Color overdueSurface = Color(0xFFFDEAE8);
 }
 
+/// Size of the holiday emoji in a month cell. Three times the old 11pt, which
+/// is large enough to read the day at a glance from across the grid.
+const double _holidayEmojiSize = 33;
+
 enum AppSection { lists, calendar }
 
 enum CalendarMode { year, month, day }
@@ -1749,7 +1753,8 @@ class _OceanListsPageState extends State<OceanListsPage> {
 
               final bool selected = _isSameDay(date, _calendarDate);
               final bool today = _isSameDay(date, DateTime.now());
-              final Holiday? holiday = UsHolidays.primaryOn(date);
+              final List<Holiday> holidays = UsHolidays.on(date);
+              final Holiday? holiday = holidays.isEmpty ? null : holidays.first;
 
               return InkWell(
                 borderRadius: BorderRadius.circular(12),
@@ -1777,6 +1782,7 @@ class _OceanListsPageState extends State<OceanListsPage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
                       Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: <Widget>[
                           Text(
                             '$dayNumber',
@@ -1792,13 +1798,19 @@ class _OceanListsPageState extends State<OceanListsPage> {
                           ),
                           if (holiday != null) ...<Widget>[
                             const Spacer(),
-                            // Emoji where the holiday has one, otherwise a dot,
-                            // so civic observances are still marked.
+                            // Sized to sit in the corner at a glance. The row
+                            // grows to fit it, so the task bars below are
+                            // pushed down rather than covered.
                             Tooltip(
-                              message: holiday.name,
+                              message: holidays
+                                  .map((Holiday h) => h.name)
+                                  .join(' · '),
                               child: Text(
-                                holiday.emoji ?? '•',
-                                style: const TextStyle(fontSize: 11),
+                                holiday.emoji,
+                                style: const TextStyle(
+                                  fontSize: _holidayEmojiSize,
+                                  height: 1,
+                                ),
                               ),
                             ),
                           ],
@@ -1880,8 +1892,8 @@ class _OceanListsPageState extends State<OceanListsPage> {
       child: Row(
         children: <Widget>[
           Text(
-            holidays.first.emoji ?? '📅',
-            style: const TextStyle(fontSize: 20),
+            holidays.first.emoji,
+            style: const TextStyle(fontSize: 26),
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -1901,6 +1913,11 @@ class _OceanListsPageState extends State<OceanListsPage> {
                 if (holidays.any((Holiday h) => h.isFederal))
                   const Text(
                     'Federal holiday',
+                    style: TextStyle(color: Color(0xFF9A6B1F), fontSize: 12),
+                  ),
+                if (holidays.any((Holiday h) => h.isApproximate))
+                  const Text(
+                    'Date follows a moon sighting and may differ locally',
                     style: TextStyle(color: Color(0xFF9A6B1F), fontSize: 12),
                   ),
               ],

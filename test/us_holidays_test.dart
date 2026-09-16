@@ -123,8 +123,11 @@ void main() {
     });
 
     test('returns nothing on an ordinary day', () {
-      expect(UsHolidays.on(DateTime(2026, 3, 4)), isEmpty);
-      expect(UsHolidays.primaryOn(DateTime(2026, 3, 4)), isNull);
+      // Found rather than hardcoded: the holiday set grows, and a date that is
+      // quiet today may not be after the next addition.
+      final DateTime ordinary = _firstQuietDay(2026);
+      expect(UsHolidays.on(ordinary), isEmpty);
+      expect(UsHolidays.primaryOn(ordinary), isNull);
     });
 
     test('ignores the time component', () {
@@ -148,7 +151,8 @@ void main() {
     test('works across years without cache bleed', () {
       expect(UsHolidays.primaryOn(DateTime(2025, 11, 27))?.name, 'Thanksgiving');
       expect(UsHolidays.primaryOn(DateTime(2026, 11, 26))?.name, 'Thanksgiving');
-      expect(UsHolidays.on(DateTime(2026, 11, 27)), isEmpty);
+      // The 27th is Black Friday in 2026, not Thanksgiving.
+      expect(UsHolidays.primaryOn(DateTime(2026, 11, 27))?.name, 'Black Friday');
     });
   });
 
@@ -169,4 +173,139 @@ void main() {
       );
     }
   });
+
+  group('religious and informal additions', () {
+    List<Holiday> year(int y) => UsHolidays.forYear(y);
+    Holiday? find(int y, String name) {
+      final Iterable<Holiday> hits = year(y).where((Holiday h) => h.name == name);
+      return hits.isEmpty ? null : hits.first;
+    }
+
+    test('April Fools and the other fixed fun days are present', () {
+      expect(find(2026, "April Fools' Day")?.date, DateTime(2026, 4, 1));
+      expect(find(2026, 'Pi Day')?.date, DateTime(2026, 3, 14));
+      expect(find(2026, 'Star Wars Day')?.date, DateTime(2026, 5, 4));
+      expect(find(2026, 'Groundhog Day')?.date, DateTime(2026, 2, 2));
+    });
+
+    test('Leap Day appears only in leap years', () {
+      expect(find(2024, 'Leap Day')?.date, DateTime(2024, 2, 29));
+      expect(find(2026, 'Leap Day'), isNull);
+    });
+
+    test('every Friday the 13th in a year is found', () {
+      for (int y = 2024; y <= 2030; y++) {
+        final List<Holiday> found = year(
+          y,
+        ).where((Holiday h) => h.name == 'Friday the 13th').toList();
+        final int actual = List<int>.generate(12, (int i) => i + 1)
+            .where((int m) => DateTime(y, m, 13).weekday == DateTime.friday)
+            .length;
+        expect(found, hasLength(actual), reason: 'year $y');
+        for (final Holiday h in found) {
+          expect(h.date.weekday, DateTime.friday);
+          expect(h.date.day, 13);
+        }
+      }
+    });
+
+    test('Hanukkah lands in November or December every year', () {
+      for (int y = 2024; y <= 2035; y++) {
+        final Holiday? hanukkah = find(y, 'Hanukkah begins');
+        expect(hanukkah, isNotNull, reason: 'year $y');
+        expect(hanukkah!.date.month, anyOf(11, 12), reason: 'year $y');
+        expect(hanukkah.emoji, '🕎');
+      }
+    });
+
+    test('the major Jewish holidays appear each year', () {
+      for (int y = 2025; y <= 2032; y++) {
+        for (final String name in <String>[
+          'Rosh Hashanah',
+          'Yom Kippur',
+          'Passover begins',
+          'Purim',
+        ]) {
+          expect(find(y, name), isNotNull, reason: '$name $y');
+        }
+      }
+    });
+
+    test('Good Friday is two days before Easter', () {
+      for (int y = 2024; y <= 2032; y++) {
+        expect(
+          find(y, 'Good Friday')!.date,
+          easterSunday(y).subtract(const Duration(days: 2)),
+        );
+        expect(find(y, 'Good Friday')!.date.weekday, DateTime.friday);
+      }
+    });
+
+    test('Ash Wednesday is always a Wednesday', () {
+      for (int y = 2024; y <= 2032; y++) {
+        expect(find(y, 'Ash Wednesday')!.date.weekday, DateTime.wednesday);
+      }
+    });
+
+    test('Ramadan and Eid appear and are flagged approximate', () {
+      final Holiday? ramadan = find(2027, 'Ramadan begins');
+      expect(ramadan, isNotNull);
+      expect(ramadan!.isApproximate, isTrue);
+      expect(find(2027, 'Eid al-Fitr')?.isApproximate, isTrue);
+    });
+
+    test('solemn observances carry the neutral marker, not a festive emoji', () {
+      const List<String> solemn = <String>[
+        'Yom Kippur',
+        'Good Friday',
+        'Ash Wednesday',
+        'Patriot Day',
+        'Memorial Day',
+        'Martin Luther King Jr. Day',
+        'Ashura',
+        'International Holocaust Remembrance Day',
+      ];
+      for (final Holiday h in year(2026)) {
+        if (solemn.contains(h.name)) {
+          expect(h.emoji, kNeutralMarker, reason: h.name);
+        }
+      }
+    });
+
+    test('every holiday has an emoji so the calendar always marks the day', () {
+      for (int y = 2024; y <= 2032; y++) {
+        for (final Holiday h in year(y)) {
+          expect(h.emoji, isNotEmpty, reason: '${h.name} $y');
+        }
+      }
+    });
+
+    test('Black Friday follows Thanksgiving', () {
+      for (int y = 2024; y <= 2032; y++) {
+        expect(
+          find(y, 'Black Friday')!.date,
+          find(y, 'Thanksgiving')!.date.add(const Duration(days: 1)),
+        );
+      }
+    });
+
+    test('Election Day is the Tuesday after the first Monday in November', () {
+      for (int y = 2024; y <= 2032; y++) {
+        final DateTime election = find(y, 'Election Day')!.date;
+        expect(election.weekday, DateTime.tuesday);
+        expect(election.day, inInclusiveRange(2, 8));
+      }
+    });
+  });
+}
+
+/// First day of [year] with no observance on it.
+DateTime _firstQuietDay(int year) {
+  for (int day = 1; day <= 365; day++) {
+    final DateTime date = DateTime(year, 1, day);
+    if (date.year == year && UsHolidays.on(date).isEmpty) {
+      return date;
+    }
+  }
+  throw StateError('no quiet day in $year');
 }
