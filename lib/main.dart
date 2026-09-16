@@ -16,6 +16,8 @@ import 'firebase_options.dart';
 import 'gemini_quackers_service.dart';
 import 'widgets/ocean_background.dart';
 
+//hello this is a test
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
