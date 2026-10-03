@@ -3,13 +3,15 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'models.dart';
+import 'task_changes.dart';
 
 /// Reads and writes the signed-in user's lists and tasks.
 ///
 /// Firestore layout (see SETUP.md):
 ///
 ///   lists/{listId}  { ownerId, name, order, createdAt }
-///   tasks/{taskId}  { ownerId, listId, name, dueDate, isDone, createdAt }
+///   tasks/{taskId}  { ownerId, listId, name, dueDate, hasTime,
+///                     durationMinutes, isDone, createdAt }
 ///
 /// Both are top-level collections scoped by an `ownerId` field, which is what
 /// firestore.rules matches against `request.auth.uid`.
@@ -166,9 +168,17 @@ class PlannerRepository {
     required String listId,
     required String name,
     DateTime? dueDate,
+    bool hasTime = false,
+    int? durationMinutes,
   }) async {
     final DocumentReference<Map<String, dynamic>> doc = await _tasks.add(
-      TaskItem(name: name, dueDate: dueDate, listId: listId).toFirestore(uid),
+      TaskItem(
+        name: name,
+        dueDate: dueDate,
+        hasTime: hasTime,
+        durationMinutes: durationMinutes,
+        listId: listId,
+      ).toFirestore(uid),
     );
     return doc.id;
   }
@@ -184,6 +194,100 @@ class PlannerRepository {
   }
 
   Future<void> deleteTask(String taskId) => _tasks.doc(taskId).delete();
+
+  /// Writes a set of Quackers' proposed changes as one batch, so they land
+  /// together or not at all, and returns what [restore] needs to undo them.
+  ///
+  /// Every task being updated or deleted is read first. That both captures it
+  /// for undo and catches a task deleted since Quackers looked, which would
+  /// otherwise fail the whole batch with a less helpful error.
+  ///
+  /// Throws [StaleTaskChangeException] if a task is gone.
+  Future<TaskRestorePoint> applyTaskChanges(List<TaskChange> changes) async {
+    final Map<String, Map<String, dynamic>?> prior =
+        <String, Map<String, dynamic>?>{};
+    final WriteBatch batch = _db.batch();
+
+    for (final TaskChange change in changes) {
+      if (change.kind == TaskChangeKind.create) {
+        final TaskState after = change.after!;
+        final DocumentReference<Map<String, dynamic>> ref = _tasks.doc();
+        prior[ref.id] = null;
+        batch.set(
+          ref,
+          TaskItem(
+            name: after.name,
+            listId: after.listId,
+            dueDate: after.dueDate,
+            hasTime: after.hasTime,
+            durationMinutes: after.durationMinutes,
+            isDone: after.done,
+          ).toFirestore(uid),
+        );
+        continue;
+      }
+
+      final DocumentReference<Map<String, dynamic>> ref = _tasks.doc(
+        change.taskId,
+      );
+      Map<String, dynamic>? current;
+      try {
+        current = (await ref.get()).data();
+      } on FirebaseException catch (error) {
+        // The rules match on the document's ownerId, and a deleted document
+        // has none, so reading one is denied rather than coming back empty.
+        if (error.code != 'permission-denied') rethrow;
+      }
+      if (current == null || current['ownerId'] != uid) {
+        throw StaleTaskChangeException(change.before!.name);
+      }
+      prior.putIfAbsent(ref.id, () => current);
+
+      if (change.kind == TaskChangeKind.delete) {
+        batch.delete(ref);
+      } else {
+        final Map<String, dynamic> fields = _changedFields(change);
+        if (fields.isNotEmpty) batch.update(ref, fields);
+      }
+    }
+
+    await batch.commit();
+    return TaskRestorePoint(prior);
+  }
+
+  /// Puts every task an apply touched back the way it was: created tasks are
+  /// deleted, and changed or deleted ones are rewritten from their saved copy.
+  Future<void> restore(TaskRestorePoint point) async {
+    final WriteBatch batch = _db.batch();
+    point.priorDocs.forEach((String id, Map<String, dynamic>? data) {
+      if (data == null) {
+        batch.delete(_tasks.doc(id));
+      } else {
+        batch.set(_tasks.doc(id), data);
+      }
+    });
+    await batch.commit();
+  }
+
+  /// Only the fields an update actually changes, so anything the user edited
+  /// by hand while the proposal sat on screen survives it.
+  Map<String, dynamic> _changedFields(TaskChange change) {
+    final TaskState before = change.before!;
+    final TaskState after = change.after!;
+    return <String, dynamic>{
+      if (after.name != before.name) 'name': after.name,
+      if (after.listId != before.listId) 'listId': after.listId,
+      if (after.done != before.done) 'isDone': after.done,
+      if (!after.sameScheduleAs(before)) ...<String, dynamic>{
+        'dueDate': after.dueDate == null
+            ? null
+            : Timestamp.fromDate(after.dueDate!),
+        'hasTime': after.hasTime,
+      },
+      if (after.durationMinutes != before.durationMinutes)
+        'durationMinutes': after.durationMinutes,
+    };
+  }
 
   /// Gives a brand-new account something to look at on first sign-in.
   Future<void> seedStarterLists() async {
@@ -202,4 +306,15 @@ class PlannerRepository {
       dueDate: DateTime.now(),
     );
   }
+}
+
+/// A proposed change refers to a task that no longer exists, usually because
+/// it was deleted after Quackers looked at the planner.
+class StaleTaskChangeException implements Exception {
+  const StaleTaskChangeException(this.taskName);
+
+  final String taskName;
+
+  @override
+  String toString() => 'StaleTaskChangeException: $taskName';
 }

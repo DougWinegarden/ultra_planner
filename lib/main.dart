@@ -12,10 +12,13 @@ import 'auth/auth_service.dart';
 import 'data/models.dart';
 import 'data/calendar_layout.dart';
 import 'data/planner_repository.dart';
+import 'data/task_changes.dart';
+import 'data/task_time.dart';
 import 'data/us_holidays.dart';
 import 'firebase_options.dart';
 import 'gemini_quackers_service.dart';
 import 'widgets/app_background.dart';
+import 'widgets/change_proposal_card.dart';
 import 'widgets/holiday_theme.dart';
 import 'widgets/ocean_background.dart';
 
@@ -530,6 +533,8 @@ class _OceanListsPageState extends State<OceanListsPage> {
     final TaskListData list = targetList ?? _currentList;
     final TextEditingController controller = TextEditingController();
     DateTime? selectedDate = initialDate;
+    int? selectedMinute;
+    int? selectedDuration;
 
     final TaskItem? task = await showDialog<TaskItem>(
       context: context,
@@ -582,6 +587,58 @@ class _OceanListsPageState extends State<OceanListsPage> {
                           ),
                         ),
                       ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: <Widget>[
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              // A time of day needs a day to sit on.
+                              onPressed: selectedDate == null
+                                  ? null
+                                  : () async {
+                                      final TimeOfDay? time =
+                                          await showTimePicker(
+                                            context: dialogContext,
+                                            initialTime: _timeOfDay(
+                                              selectedMinute ?? 9 * 60,
+                                            ),
+                                          );
+                                      if (time != null) {
+                                        setDialogState(() {
+                                          selectedMinute =
+                                              time.hour * 60 + time.minute;
+                                        });
+                                      }
+                                    },
+                              icon: const Icon(Icons.schedule),
+                              label: Text(
+                                selectedMinute == null
+                                    ? 'Time'
+                                    : formatClock(selectedMinute!),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          DropdownButton<int?>(
+                            value: selectedDuration,
+                            onChanged: (int? minutes) {
+                              setDialogState(() => selectedDuration = minutes);
+                            },
+                            items: <int?>[null, 15, 30, 45, 60, 90, 120, 180]
+                                .map(
+                                  (int? minutes) => DropdownMenuItem<int?>(
+                                    value: minutes,
+                                    child: Text(
+                                      minutes == null
+                                          ? 'Any length'
+                                          : formatDuration(minutes),
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                          ),
+                        ],
+                      ),
                     ],
                   ),
                   actions: <Widget>[
@@ -594,7 +651,16 @@ class _OceanListsPageState extends State<OceanListsPage> {
                         final String taskName = controller.text.trim();
                         if (taskName.isNotEmpty) {
                           Navigator.of(dialogContext).pop(
-                            TaskItem(name: taskName, dueDate: selectedDate),
+                            TaskItem(
+                              name: taskName,
+                              dueDate: selectedDate == null
+                                  ? null
+                                  : atMinute(selectedDate!, selectedMinute),
+                              hasTime:
+                                  selectedDate != null &&
+                                  selectedMinute != null,
+                              durationMinutes: selectedDuration,
+                            ),
                           );
                         }
                       },
@@ -615,6 +681,8 @@ class _OceanListsPageState extends State<OceanListsPage> {
       listId: list.id,
       name: task.name,
       dueDate: task.dueDate,
+      hasTime: task.hasTime,
+      durationMinutes: task.durationMinutes,
     );
     if (!mounted) return;
 
@@ -623,6 +691,9 @@ class _OceanListsPageState extends State<OceanListsPage> {
     }
   }
 
+  /// Picks a new day for [task]. A timed task also offers its time for
+  /// change, so it does not quietly turn into an all-day task at midnight;
+  /// dismissing the time picker keeps the time it had.
   Future<void> _changeDueDate(TaskItem task) async {
     final DateTime now = DateTime.now();
 
@@ -637,27 +708,33 @@ class _OceanListsPageState extends State<OceanListsPage> {
       return;
     }
 
-    await _planner.setTaskDueDate(task.id, date);
-    if (!mounted) return;
-    setState(() => _calendarDate = date);
-  }
-
-  Future<void> _editTaskDate(DatedTask datedTask) async {
-    final DateTime now = DateTime.now();
-    final DateTime? date = await showDatePicker(
-      context: context,
-      initialDate: datedTask.task.dueDate ?? now,
-      firstDate: DateTime(now.year - 10),
-      lastDate: DateTime(now.year + 20),
-    );
-
-    if (!mounted || date == null) {
-      return;
+    int? minute;
+    if (task.hasTime && task.dueDate != null) {
+      minute = minuteOfDay(task.dueDate!);
+      final TimeOfDay? time = await showTimePicker(
+        context: context,
+        initialTime: _timeOfDay(minute),
+      );
+      if (!mounted) return;
+      if (time != null) minute = time.hour * 60 + time.minute;
     }
 
-    await _planner.setTaskDueDate(datedTask.task.id, date);
+    final DateTime due = atMinute(date, minute);
+    await _planner.setTaskDueDate(task.id, due);
     if (!mounted) return;
-    setState(() => _calendarDate = date);
+    setState(() => _calendarDate = due);
+  }
+
+  static TimeOfDay _timeOfDay(int minuteOfDay) =>
+      TimeOfDay(hour: minuteOfDay ~/ 60, minute: minuteOfDay % 60);
+
+  /// "2026-10-03 · 5:00 PM · 30 min", or just the date for an all-day task.
+  static String _dueLabel(TaskItem task) {
+    return <String>[
+      _formatDate(task.dueDate!),
+      if (task.hasTime) formatClock(minuteOfDay(task.dueDate!)),
+      if (task.durationMinutes != null) formatDuration(task.durationMinutes!),
+    ].join(' · ');
   }
 
   static String _formatDate(DateTime date) {
@@ -789,17 +866,13 @@ class _OceanListsPageState extends State<OceanListsPage> {
     return 'Start with the nearest deadline, then give yourself a small, specific first step.';
   }
 
-  String get _taskContext => _lists
-      .map((TaskListData list) {
-        final String tasks = list.tasks
-            .map(
-              (TaskItem task) =>
-                  '- ${task.name} | ${task.isDone ? 'completed' : 'not completed'} | ${task.dueDate == null ? 'no due date' : 'due ${_formatDate(task.dueDate!)}'}',
-            )
-            .join('\n');
-        return 'List: ${list.name}\n${tasks.isEmpty ? '- no tasks' : tasks}';
-      })
-      .join('\n\n');
+  /// What Quackers plans with, rebuilt for every question so it always sees
+  /// changes made since the chat opened, including its own.
+  Map<String, Object?> _plannerSnapshot() => buildPlannerSnapshot(
+    _lists,
+    now: DateTime.now(),
+    defaultListId: _currentListOrNull?.id,
+  );
 
   void _showAssistant() {
     final DatedTask? pick = _assistantPick;
@@ -811,7 +884,8 @@ class _OceanListsPageState extends State<OceanListsPage> {
       builder: (BuildContext sheetContext) {
         return QuackersChatSheet(
           service: _quackers,
-          taskContext: _taskContext,
+          planner: _planner,
+          plannerSnapshot: _plannerSnapshot,
           suggestedTask: pick?.task.name,
           suggestedTip: _assistantTip,
           userId: widget.user.uid,
@@ -1435,8 +1509,8 @@ class _OceanListsPageState extends State<OceanListsPage> {
                     task.dueDate == null
                         ? 'No due date'
                         : overdue
-                        ? '🌊 Tsunami overdue: ${_formatDate(task.dueDate!)}'
-                        : 'Due: ${_formatDate(task.dueDate!)}',
+                        ? '🌊 Tsunami overdue: ${_dueLabel(task)}'
+                        : 'Due: ${_dueLabel(task)}',
                     style: TextStyle(
                       color: overdue
                           ? TaskStatusColors.overdue
@@ -1952,6 +2026,14 @@ class _OceanListsPageState extends State<OceanListsPage> {
       if (a.task.isDone != b.task.isDone) {
         return a.task.isDone ? 1 : -1;
       }
+      // The day's timed tasks in time order, ahead of its all-day ones.
+      if (a.task.hasTime != b.task.hasTime) {
+        return a.task.hasTime ? -1 : 1;
+      }
+      if (a.task.hasTime) {
+        final int byTime = a.task.dueDate!.compareTo(b.task.dueDate!);
+        if (byTime != 0) return byTime;
+      }
       return a.task.name.compareTo(b.task.name);
     });
 
@@ -2003,7 +2085,7 @@ class _OceanListsPageState extends State<OceanListsPage> {
         final DatedTask item = dayTasks[index];
 
         return GestureDetector(
-          onLongPress: () => _editTaskDate(item),
+          onLongPress: () => _changeDueDate(item.task),
           child: _buildTaskCard(
             item.list,
             item.task,
@@ -2059,7 +2141,8 @@ class QuackersChatSheet extends StatefulWidget {
   const QuackersChatSheet({
     super.key,
     required this.service,
-    required this.taskContext,
+    required this.planner,
+    required this.plannerSnapshot,
     required this.suggestedTip,
     required this.userId,
     required this.hasApiKey,
@@ -2069,7 +2152,12 @@ class QuackersChatSheet extends StatefulWidget {
   });
 
   final GeminiQuackersService service;
-  final String taskContext;
+
+  /// Writes the changes the user approves.
+  final PlannerRepository planner;
+
+  /// Called for every question, so Quackers sees the planner as it is now.
+  final Map<String, Object?> Function() plannerSnapshot;
   final String suggestedTip;
 
   /// Scopes locally-cached chat history so two accounts on one device do not
@@ -2091,6 +2179,13 @@ class QuackersChatSheet extends StatefulWidget {
 
 class _QuackersChatSheetState extends State<QuackersChatSheet> {
   static const String _chatStoragePrefix = 'quackers_chat_history_v2';
+
+  /// Shown on a fresh chat so it is obvious Quackers can change things too.
+  static const List<String> _examples = <String>[
+    'What’s overdue?',
+    'Plan my day tomorrow',
+    'Give me 2 hours Saturday for homework',
+  ];
 
   String get _chatStorageKey => '$_chatStoragePrefix.${widget.userId}';
   final TextEditingController _controller = TextEditingController();
@@ -2124,17 +2219,29 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
     });
     _scrollToBottom();
     try {
-      final String answer = await _askWithRetry(
+      final QuackersReply reply = await _askWithRetry(
         question: question,
         conversation: _messages.length > 1
             ? _messages.sublist(0, _messages.length - 1)
             : const <QuackersChatMessage>[],
       );
       if (!mounted) return;
+      final ChangeProposal? proposal = reply.changes.isEmpty
+          ? null
+          : ChangeProposal(reply.changes);
       setState(
-        () => _messages.add(QuackersChatMessage(text: answer, isUser: false)),
+        () => _messages.add(
+          QuackersChatMessage(
+            text: reply.text,
+            isUser: false,
+            proposal: proposal,
+          ),
+        ),
       );
       _saveHistory();
+      if (proposal != null && proposal.appliesImmediately) {
+        await _applyProposal(proposal);
+      }
     } on QuackersException catch (error) {
       if (!mounted) return;
       if (error.needsApiKey) {
@@ -2179,7 +2286,7 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
     }
   }
 
-  Future<String> _askWithRetry({
+  Future<QuackersReply> _askWithRetry({
     required String question,
     required List<QuackersChatMessage> conversation,
   }) async {
@@ -2192,7 +2299,7 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
       try {
         return await widget.service.respond(
           question: question,
-          taskContext: widget.taskContext,
+          planner: widget.plannerSnapshot(),
           conversation: conversation,
         );
       } on QuackersException catch (error) {
@@ -2201,6 +2308,81 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
       }
     }
     throw const QuackersException('Quackers could not respond.');
+  }
+
+  /// Writes the ticked changes in one batch, keeping what Undo needs.
+  Future<void> _applyProposal(ChangeProposal proposal) async {
+    final List<TaskChange> chosen = proposal.selectedChanges;
+    if (chosen.isEmpty) return;
+
+    setState(() {
+      proposal.status = ProposalStatus.applying;
+      proposal.error = null;
+    });
+    try {
+      final TaskRestorePoint point = await widget.planner.applyTaskChanges(
+        chosen,
+      );
+      if (!mounted) return;
+      setState(() {
+        proposal.status = ProposalStatus.applied;
+        proposal.restorePoint = point;
+      });
+      _revealIfLatest(proposal);
+    } on StaleTaskChangeException catch (error) {
+      if (!mounted) return;
+      // Left pending so the user can untick that one and apply the rest.
+      setState(() {
+        proposal.status = ProposalStatus.pending;
+        proposal.error =
+            '“${error.taskName}” was changed or removed since Quackers '
+            'looked. Untick it, or ask again for a fresh plan.';
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        proposal.status = ProposalStatus.pending;
+        proposal.error =
+            'Could not save those changes. Check your connection and try '
+            'again.';
+      });
+    }
+  }
+
+  Future<void> _undoProposal(ChangeProposal proposal) async {
+    final TaskRestorePoint? point = proposal.restorePoint;
+    if (point == null) return;
+
+    setState(() {
+      proposal.status = ProposalStatus.undoing;
+      proposal.error = null;
+    });
+    try {
+      await widget.planner.restore(point);
+      if (!mounted) return;
+      setState(() => proposal.status = ProposalStatus.undone);
+      _revealIfLatest(proposal);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        proposal.status = ProposalStatus.applied;
+        proposal.error = 'Could not undo. Check your connection and try again.';
+      });
+    }
+  }
+
+  /// The card changes height as it changes state; keep the newest one in
+  /// view, but leave the scroll alone for an older one the user scrolled to.
+  void _revealIfLatest(ChangeProposal proposal) {
+    if (_messages.isNotEmpty && identical(_messages.last.proposal, proposal)) {
+      _scrollToBottom();
+    }
+  }
+
+  void _askExample(String example) {
+    if (_isSending) return;
+    _controller.text = example;
+    _send();
   }
 
   Future<void> _loadHistory() async {
@@ -2309,7 +2491,8 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
                         );
                       }
                       final QuackersChatMessage message = _messages[index];
-                      return Align(
+                      final ChangeProposal? proposal = message.proposal;
+                      final Widget bubble = Align(
                         alignment: message.isUser
                             ? Alignment.centerRight
                             : Alignment.centerLeft,
@@ -2336,6 +2519,25 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
                           ),
                         ),
                       );
+                      if (proposal == null) return bubble;
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          bubble,
+                          ChangeProposalCard(
+                            proposal: proposal,
+                            onApply: () => _applyProposal(proposal),
+                            onCancel: () => setState(
+                              () => proposal.status = ProposalStatus.cancelled,
+                            ),
+                            onUndo: () => _undoProposal(proposal),
+                            onToggle: (int i) => setState(
+                              () =>
+                                  proposal.selected[i] = !proposal.selected[i],
+                            ),
+                          ),
+                        ],
+                      );
                     },
                   ),
                 ),
@@ -2349,7 +2551,7 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
                         textCapitalization: TextCapitalization.sentences,
                         onSubmitted: (_) => _send(),
                         decoration: const InputDecoration(
-                          hintText: 'Ask about your tasks…',
+                          hintText: 'Ask or plan something…',
                           filled: true,
                           fillColor: Colors.white,
                           border: OutlineInputBorder(
@@ -2454,6 +2656,23 @@ class _QuackersChatSheetState extends State<QuackersChatSheet> {
             label: const Text('Start this task'),
           ),
         ],
+        const SizedBox(height: 8),
+        const Text(
+          'I can change your planner too. Try:',
+          style: TextStyle(color: Color(0xFF6A5200), fontSize: 13),
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: <Widget>[
+            for (final String example in _examples)
+              ActionChip(
+                label: Text(example),
+                onPressed: () => _askExample(example),
+              ),
+          ],
+        ),
       ],
     ),
   );

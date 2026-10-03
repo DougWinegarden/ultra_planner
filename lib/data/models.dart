@@ -4,11 +4,17 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 ///
 /// Backed by a document in the top-level `tasks` collection. [id] is empty only
 /// for an item that has not been written to Firestore yet.
+///
+/// [dueDate] is a whole day unless [hasTime] is set, in which case its time of
+/// day is when the task starts. Tasks written before times existed have no
+/// `hasTime` field and read as whole days, whatever time their timestamp holds.
 class TaskItem {
   TaskItem({
     this.id = '',
     required this.name,
     this.dueDate,
+    this.hasTime = false,
+    this.durationMinutes,
     this.isDone = false,
     this.listId = '',
     this.createdAt,
@@ -20,6 +26,8 @@ class TaskItem {
       id: doc.id,
       name: (data['name'] as String?) ?? '',
       dueDate: (data['dueDate'] as Timestamp?)?.toDate(),
+      hasTime: data['hasTime'] == true && data['dueDate'] != null,
+      durationMinutes: (data['durationMinutes'] as num?)?.toInt(),
       isDone: (data['isDone'] as bool?) ?? false,
       listId: (data['listId'] as String?) ?? '',
       createdAt: (data['createdAt'] as Timestamp?)?.toDate(),
@@ -29,6 +37,12 @@ class TaskItem {
   final String id;
   String name;
   DateTime? dueDate;
+
+  /// Whether [dueDate]'s time of day is meaningful.
+  bool hasTime;
+
+  /// How long the task takes, when known.
+  int? durationMinutes;
   bool isDone;
   String listId;
   DateTime? createdAt;
@@ -39,6 +53,8 @@ class TaskItem {
       'listId': listId,
       'name': name,
       'dueDate': dueDate == null ? null : Timestamp.fromDate(dueDate!),
+      'hasTime': hasTime && dueDate != null,
+      'durationMinutes': durationMinutes,
       'isDone': isDone,
       'createdAt': createdAt == null
           ? FieldValue.serverTimestamp()

@@ -244,6 +244,12 @@ You'll get two starter lists ("School" and "Shopping") on first sign-in.
 Quackers needs the Cloud Functions from **Part 5**, plus your own Gemini API key
 entered in the app once Part 5 is deployed.
 
+Quackers can change your planner as well as talk about it: "What's overdue?",
+"Move everything after 5 PM to tomorrow", "Give me two hours Saturday for my
+game project". Changes appear as a card in the chat. A single small change is
+saved straight away with an **Undo** button; anything bigger, and any delete,
+waits for you to press **Apply**. See "How Quackers changes the planner" below.
+
 Everything else -- lists, tasks, the calendar -- works without it.
 
 ---
@@ -290,12 +296,14 @@ lists/{listId}
   createdAt  timestamp
 
 tasks/{taskId}
-  ownerId    uid of the owner
-  listId     id of the parent lists/ document
-  name       task text
-  dueDate    timestamp or null
-  isDone     boolean
-  createdAt  timestamp
+  ownerId          uid of the owner
+  listId           id of the parent lists/ document
+  name             task text
+  dueDate          timestamp or null
+  hasTime          boolean; true when dueDate's time of day is a start time
+  durationMinutes  number or null
+  isDone           boolean
+  createdAt        timestamp
 
 users/{uid}/private/settings
   geminiApiKey  string
@@ -313,6 +321,9 @@ No composite indexes are needed — sorting happens client-side in
 Deleting a list also deletes its tasks (`PlannerRepository.deleteList`).
 Firestore does not cascade on its own, and orphaned tasks would keep showing up
 in the calendar.
+
+Tasks saved before times existed have no `hasTime` field and read as all-day
+tasks, so no migration is needed.
 
 ---
 
@@ -434,7 +445,7 @@ each device instead.
 | `saveGeminiKey` | Encrypts and stores the caller's key. Returns only a `...abcd` hint. |
 | `quackersStatus` | Whether a key is saved, plus that hint. Never the key. |
 | `deleteGeminiKey` | Forgets the caller's key. |
-| `askQuackers` | Decrypts the caller's key, calls Gemini, returns the reply. |
+| `askQuackers` | Decrypts the caller's key, runs Gemini with the planner tools, returns the reply and any proposed changes. |
 
 All four reject unauthenticated callers. `askQuackers` also validates input
 (2000-char question, 8000-char context, last 20 turns) and rate limits to 30
@@ -443,8 +454,53 @@ transaction so simultaneous calls cannot both slip past. Tune the constants in
 `functions/rateLimit.js`.
 
 Gemini errors are logged in full server-side; the app gets a safe message. A
-`400` or `403` from Gemini is reported as a rejected key, which is the one cause
-the user can actually fix.
+`403`, or a `400` that says the key is invalid, is reported as a rejected key,
+which is the one cause the user can actually fix. Any other `400` is a bad
+request, not a bad key, so it does not send the user back to key setup.
+
+# How Quackers changes the planner
+
+```
+App --(question + planner snapshot)--> askQuackers <--tools--> Gemini
+ ^                                         |
+ |                                  proposed changes
+ +---- user taps Apply -- app writes them to Firestore (batch, with Undo)
+```
+
+With each question the app sends a snapshot of the user's lists and tasks, in
+local wall-clock time ("2026-10-03", "17:00"). Gemini gets a small set of tools
+(`functions/plannerTools.js`) that work on that snapshot:
+
+| Tool | What it does |
+| --- | --- |
+| `get_tasks` | Look tasks up by date range, status (open, done, overdue), name or list. Reports overlapping timed tasks as conflicts. |
+| `find_free_time` | Free windows of a given length between the timed tasks on each day, skipping time already past. |
+| `create_task`, `update_task`, `delete_task` | Propose a change. |
+
+**The function never writes a task.** Write tools only change a working copy;
+when Gemini is done, the difference between the snapshot and the copy goes back
+to the app as before/after pairs. The app shows them, the user approves, and the
+app writes them in one batch with its own Firestore access, so the security
+rules still decide what is allowed. Undo restores every touched task from a copy
+taken just before the write.
+
+Safeguards:
+
+- At most 40 tasks changed per question, and 6 Gemini calls per question.
+- Tool arguments are validated (real dates, `HH:MM` times, known task and list
+  ids); a bad call gets an error back that Gemini can correct.
+- An update writes only the fields that changed, so an edit the user made by
+  hand while the card was open survives it.
+- A task deleted since Quackers looked stops the apply with a clear message
+  instead of half-applying.
+
+Because the server only ever sees local dates and times as text, it never has
+to know the device's time zone.
+
+**Deploy order.** The app needs this version of `askQuackers`. After pulling
+this change, run `firebase deploy --only functions` before using the new app.
+Older app builds keep working against the new function: without a snapshot it
+answers as before and proposes nothing.
 
 ## Changing the model
 
@@ -473,5 +529,7 @@ Pure logic, no emulator needed:
 cd functions && npm test
 ```
 
-20 tests: encryption round-trip, tamper detection, IV uniqueness, wrong master
-key, and the rate limit window boundaries.
+58 tests: encryption round-trip, tamper detection, IV uniqueness, wrong master
+key, the rate limit window boundaries, every planner tool, and the
+function-calling loop (driven by a scripted fake model, so no Gemini key is
+needed).

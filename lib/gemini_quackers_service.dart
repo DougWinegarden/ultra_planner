@@ -1,10 +1,53 @@
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:flutter/foundation.dart';
+
+import 'data/task_changes.dart';
 
 class QuackersChatMessage {
-  const QuackersChatMessage({required this.text, required this.isUser});
+  const QuackersChatMessage({
+    required this.text,
+    required this.isUser,
+    this.proposal,
+  });
 
   final String text;
   final bool isUser;
+
+  /// Changes Quackers proposed with this reply, if any. Not saved with the
+  /// chat history: a stale proposal reopened later could undo newer edits.
+  final ChangeProposal? proposal;
+}
+
+/// What Quackers said, and any planner changes it proposed.
+class QuackersReply {
+  const QuackersReply({
+    required this.text,
+    this.changes = const <TaskChange>[],
+  });
+
+  /// Reads the `askQuackers` result. A change the app cannot understand is
+  /// dropped rather than failing the whole reply.
+  factory QuackersReply.fromData(Object? data) {
+    final String text = data is Map
+        ? (data['text']?.toString() ?? '')
+        : (data?.toString() ?? '');
+    final List<TaskChange> changes = <TaskChange>[];
+    final Object? actions = data is Map ? data['actions'] : null;
+    if (actions is List) {
+      for (final Object? action in actions) {
+        if (action is! Map) continue;
+        try {
+          changes.add(TaskChange.fromJson(action));
+        } on FormatException catch (error) {
+          debugPrint('Ignoring a task change from Quackers: $error');
+        }
+      }
+    }
+    return QuackersReply(text: text.trim(), changes: changes);
+  }
+
+  final String text;
+  final List<TaskChange> changes;
 }
 
 /// Talks to Quackers through Cloud Functions.
@@ -25,6 +68,7 @@ class GeminiQuackersService {
   static const String _saveKey = 'saveGeminiKey';
   static const String _status = 'quackersStatus';
   static const String _deleteKey = 'deleteGeminiKey';
+  static const Duration _askTimeout = Duration(seconds: 120);
 
   final FirebaseFunctions? _functions;
 
@@ -80,17 +124,25 @@ class GeminiQuackersService {
     }
   }
 
-  Future<String> respond({
+  /// Asks Quackers [question]. [planner] is the snapshot from
+  /// [buildPlannerSnapshot]; Quackers reads it with its tools and may answer
+  /// with proposed changes to it.
+  Future<QuackersReply> respond({
     required String question,
-    required String taskContext,
+    required Map<String, Object?> planner,
     required List<QuackersChatMessage> conversation,
   }) async {
     try {
       final HttpsCallableResult<dynamic> result = await _client
-          .httpsCallable(_ask)
+          .httpsCallable(
+            _ask,
+            // A planning turn can chain several Gemini calls; this matches
+            // askQuackers' own timeout in functions/index.js.
+            options: HttpsCallableOptions(timeout: _askTimeout),
+          )
           .call<dynamic>(<String, dynamic>{
             'question': question,
-            'taskContext': taskContext,
+            'planner': planner,
             'conversation': conversation
                 .map(
                   (QuackersChatMessage message) => <String, dynamic>{
@@ -101,17 +153,13 @@ class GeminiQuackersService {
                 .toList(),
           });
 
-      final Object? data = result.data;
-      final String? text = data is Map
-          ? data['text']?.toString()
-          : data?.toString();
-
-      if (text == null || text.trim().isEmpty) {
+      final QuackersReply reply = QuackersReply.fromData(result.data);
+      if (reply.text.isEmpty) {
         throw const QuackersException(
           'Quackers did not receive a response. Please try again.',
         );
       }
-      return text.trim();
+      return reply;
     } on FirebaseFunctionsException catch (error) {
       throw QuackersException(
         error.message ?? 'Quackers could not answer that one.',

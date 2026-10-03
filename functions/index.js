@@ -15,6 +15,11 @@
  * What it does not buy: anyone who can read the master secret can decrypt every
  * stored key. A proxy has to recover the plaintext to call Gemini, so that is
  * unavoidable. See crypto.js.
+ *
+ * Quackers can also change the planner. askQuackers gives Gemini a small set of
+ * tools (plannerTools.js) that read a snapshot the app sends and propose
+ * changes; the app shows those to the user and writes the ones they approve.
+ * Nothing here writes a task.
  */
 
 const {onCall, HttpsError} = require("firebase-functions/v2/https");
@@ -23,6 +28,13 @@ const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 const {evaluateRateLimit} = require("./rateLimit");
 const {encryptApiKey, decryptApiKey, keyHint} = require("./crypto");
+const {
+  PlannerSession,
+  TOOL_DECLARATIONS,
+  parseSnapshot,
+  plannerInstructions,
+} = require("./plannerTools");
+const {runToolLoop} = require("./toolLoop");
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -54,16 +66,22 @@ const MAX_CONTEXT_CHARS = 8000;
 /** Most recent turns to forward; keeps the request bounded. */
 const MAX_HISTORY_TURNS = 20;
 
-const SYSTEM_PROMPT =
+const PERSONA_PROMPT =
   "You are Quackers, a warm, playful capybara in a duck suit. Answer the " +
   "user's questions helpfully, including general questions, while also being " +
-  "a great task-planning buddy. Use only the task context below for claims " +
-  "about the user's tasks. For task or planning questions, give short, " +
+  "a great task-planning buddy. For task or planning questions, give short, " +
   "practical advice and prioritize one next action when asked. Never pretend " +
   "to have completed a task. Do not refuse a normal, safe question merely " +
   "because it is unrelated to tasks. Keep answers to five short sentences or " +
   "fewer unless the user asks for more detail. Always finish your final " +
   "sentence; never end mid-sentence.";
+
+/** For older app builds that send their tasks as text instead of a snapshot. */
+const TASK_CONTEXT_RULE =
+  "Use only the task context below for claims about the user's tasks.";
+
+/** Said when the model proposed changes but never described them. */
+const CHANGES_FALLBACK_TEXT = "Here is what I lined up for you.";
 
 /**
  * Throws if this user has spent their allowance for the current window.
@@ -122,6 +140,92 @@ function buildContents(conversation, question) {
 
   contents.push({role: "user", parts: [{text: question}]});
   return contents;
+}
+
+/**
+ * Makes one generateContent call with the user's key.
+ *
+ * @param {string} apiKey The caller's decrypted Gemini key.
+ * @param {string} model Model id.
+ * @param {object} payload Request body.
+ * @return {Promise<object>} The response body.
+ */
+async function callGemini(apiKey, model, payload) {
+  const endpoint =
+    "https://generativelanguage.googleapis.com/v1beta/models/" +
+    `${model}:generateContent`;
+
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    logger.error("Gemini request failed to send", error);
+    throw new HttpsError(
+      "unavailable",
+      "Could not reach Quackers. Please try again.",
+    );
+  }
+
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    // Log the real reason for the operator; hand the user something safe,
+    // since upstream messages can echo request details.
+    logger.error("Gemini returned an error", {
+      status: response.status,
+      body: body,
+    });
+
+    if (response.status === 403 || isKeyRejection(body)) {
+      // A bad or revoked key -- the one thing the user can fix.
+      throw new HttpsError(
+        "permission-denied",
+        "Gemini rejected your API key. Check it and enter it again.",
+      );
+    }
+    if (response.status === 429 || response.status >= 500) {
+      throw new HttpsError(
+        "unavailable",
+        "Quackers is busy right now. Please try again shortly.",
+      );
+    }
+    if (response.status === 404) {
+      throw new HttpsError(
+        "failed-precondition",
+        `The configured model (${model}) was not found. Update the ` +
+          "GEMINI_MODEL parameter.",
+      );
+    }
+    throw new HttpsError("internal", "Quackers could not answer that one.");
+  }
+
+  return body;
+}
+
+/**
+ * Whether a 400 is Gemini refusing the key, as opposed to refusing the request.
+ *
+ * Both arrive as 400 INVALID_ARGUMENT. Telling them apart matters: a key
+ * rejection sends the user back to the key setup panel, which would be the
+ * wrong fix for a malformed request.
+ *
+ * @param {object} body Error response body.
+ * @return {boolean} True when the key itself was rejected.
+ */
+function isKeyRejection(body) {
+  const error = body && body.error;
+  if (!error) return false;
+  const details = Array.isArray(error.details) ? error.details : [];
+  if (details.some((d) => d && d.reason === "API_KEY_INVALID")) return true;
+  return typeof error.message === "string" &&
+    /api key/i.test(error.message);
 }
 
 // --- Stored key access ------------------------------------------------------
@@ -246,14 +350,24 @@ exports.deleteGeminiKey = onCall(
   },
 );
 
-/** Answers a question as Quackers, using the caller's own Gemini key. */
+/**
+ * Answers a question as Quackers, using the caller's own Gemini key.
+ *
+ * When the app sends a `planner` snapshot, Quackers gets planner tools and the
+ * reply carries `actions`: proposed task changes for the app to show and, once
+ * the user approves, write. Without one (older app builds), it answers from the
+ * `taskContext` text alone and proposes nothing.
+ *
+ * Returns {text, actions}.
+ */
 exports.askQuackers = onCall(
   {
     secrets: [ENCRYPTION_KEY],
     region: "us-central1",
     // Bounded so a runaway client cannot spend the project's budget.
     maxInstances: 10,
-    timeoutSeconds: 60,
+    // A planning turn can take several Gemini calls in a row.
+    timeoutSeconds: 120,
   },
   async (request) => {
     const uid = requireUid(request);
@@ -275,6 +389,15 @@ exports.askQuackers = onCall(
         "invalid-argument",
         `Question is too long (max ${MAX_QUESTION_CHARS} characters).`,
       );
+    }
+
+    let session = null;
+    if (data.planner !== undefined && data.planner !== null) {
+      try {
+        session = new PlannerSession(parseSnapshot(data.planner));
+      } catch (error) {
+        throw new HttpsError("invalid-argument", error.message);
+      }
     }
 
     // 2. Throttle per account. Each user spends their own Gemini quota, but
@@ -303,90 +426,49 @@ exports.askQuackers = onCall(
       );
     }
 
-    // 4. Call Gemini.
+    // 4. Call Gemini, running any planner tools it asks for along the way.
     const model = GEMINI_MODEL.value();
-    const endpoint =
-      "https://generativelanguage.googleapis.com/v1beta/models/" +
-      `${model}:generateContent`;
+    const instructions = session ?
+      `${PERSONA_PROMPT}\n\n${plannerInstructions(session.snapshot)}` :
+      `${PERSONA_PROMPT} ${TASK_CONTEXT_RULE}\n\nTASK CONTEXT:\n${taskContext}`;
+    const payload = {
+      systemInstruction: {parts: [{text: instructions}]},
+      generationConfig: {
+        maxOutputTokens: 2048,
+        thinkingConfig: {thinkingLevel: "minimal"},
+      },
+    };
+    if (session) {
+      payload.tools = [{functionDeclarations: TOOL_DECLARATIONS}];
+    }
 
-    let response;
-    try {
-      response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": apiKey,
-        },
-        body: JSON.stringify({
-          systemInstruction: {
-            parts: [
-              {text: `${SYSTEM_PROMPT}\n\nTASK CONTEXT:\n${taskContext}`},
-            ],
-          },
-          contents: buildContents(data.conversation, question),
-          generationConfig: {
-            maxOutputTokens: 2048,
-            thinkingConfig: {thinkingLevel: "minimal"},
-          },
-        }),
+    const turn = await runToolLoop({
+      callModel: (contents) =>
+        callGemini(apiKey, model, {...payload, contents}),
+      runTool: (name, args) => session ?
+        session.execute(name, args) :
+        {error: "Planner tools are not available."},
+      contents: buildContents(data.conversation, question),
+    });
+
+    const actions = session ? session.changes() : [];
+    let text = turn.text;
+
+    if (text === "") {
+      logger.warn("Gemini returned no usable text", {
+        steps: turn.steps,
+        exhausted: turn.exhausted,
+        actions: actions.length,
       });
-    } catch (error) {
-      logger.error("Gemini request failed to send", error);
-      throw new HttpsError(
-        "unavailable",
-        "Could not reach Quackers. Please try again.",
-      );
-    }
-
-    const body = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-      // Log the real reason for the operator; hand the user something safe,
-      // since upstream messages can echo request details.
-      logger.error("Gemini returned an error", {
-        status: response.status,
-        body: body,
-      });
-
-      if (response.status === 400 || response.status === 403) {
-        // Almost always a bad or revoked key -- the one thing the user can fix.
+      if (actions.length === 0) {
         throw new HttpsError(
-          "permission-denied",
-          "Gemini rejected your API key. Check it and enter it again.",
+          "internal",
+          "Quackers did not have anything to say. Please try again.",
         );
       }
-      if (response.status === 429 || response.status >= 500) {
-        throw new HttpsError(
-          "unavailable",
-          "Quackers is busy right now. Please try again shortly.",
-        );
-      }
-      if (response.status === 404) {
-        throw new HttpsError(
-          "failed-precondition",
-          `The configured model (${model}) was not found. Update the ` +
-            "GEMINI_MODEL parameter.",
-        );
-      }
-      throw new HttpsError("internal", "Quackers could not answer that one.");
+      text = CHANGES_FALLBACK_TEXT;
     }
 
-    const text = body &&
-      body.candidates &&
-      body.candidates[0] &&
-      body.candidates[0].content &&
-      body.candidates[0].content.parts &&
-      body.candidates[0].content.parts[0] &&
-      body.candidates[0].content.parts[0].text;
-
-    if (typeof text !== "string" || text.trim() === "") {
-      logger.warn("Gemini returned no usable text", {body: body});
-      throw new HttpsError(
-        "internal",
-        "Quackers did not have anything to say. Please try again.",
-      );
-    }
-
-    return {text: text.trim()};
+    return {text: text, actions: actions};
   },
 );
