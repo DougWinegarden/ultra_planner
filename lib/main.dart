@@ -17,10 +17,16 @@ import 'data/task_time.dart';
 import 'data/us_holidays.dart';
 import 'firebase_options.dart';
 import 'gemini_quackers_service.dart';
+import 'progress/leaderboard_page.dart';
+import 'progress/leveling.dart';
+import 'progress/player_profile.dart';
+import 'progress/profile_page.dart';
+import 'progress/progress_repository.dart';
 import 'widgets/app_background.dart';
 import 'widgets/change_proposal_card.dart';
 import 'widgets/holiday_theme.dart';
 import 'widgets/ocean_background.dart';
+import 'widgets/ocean_xp_bar.dart';
 
 //hello this is a test
 
@@ -108,9 +114,16 @@ class OceanListsPage extends StatefulWidget {
 class _OceanListsPageState extends State<OceanListsPage> {
   final GeminiQuackersService _quackers = GeminiQuackersService();
   late final PlannerRepository _planner;
+  late final ProgressRepository _progress;
+  final ProgressService _progressService = ProgressService();
 
   StreamSubscription<List<TaskListData>>? _listSub;
   List<TaskListData> _lists = <TaskListData>[];
+
+  StreamSubscription<PlayerProfile?>? _profileSub;
+
+  /// Null until the server has created this player's profile.
+  PlayerProfile? _profile;
 
   /// Selection is held as a document id, not an index: the Firestore stream can
   /// reorder or remove lists underneath us at any time.
@@ -135,14 +148,77 @@ class _OceanListsPageState extends State<OceanListsPage> {
   void initState() {
     super.initState();
     _planner = PlannerRepository(uid: widget.user.uid);
+    _progress = ProgressRepository(uid: widget.user.uid);
     _subscribeToLists();
+    _subscribeToProfile();
     _refreshKeyStatus();
   }
 
   @override
   void dispose() {
     _listSub?.cancel();
+    _profileSub?.cancel();
     super.dispose();
+  }
+
+  /// Follows this player's XP, announcing what each finished task earned.
+  ///
+  /// XP is granted by a server trigger a moment after a task is ticked off, so
+  /// the announcement comes from the profile changing, not from the tick.
+  void _subscribeToProfile() {
+    // Gives a brand-new player a name and a place on the leaderboard. Failing
+    // is harmless: the first XP award creates the profile anyway.
+    _progressService.ensureProfile().catchError((Object error) {
+      debugPrint('Could not set up the player profile: $error');
+    });
+
+    _profileSub = _progress.watchProfile().listen((PlayerProfile? profile) {
+      if (!mounted) return;
+      final PlayerProfile? before = _profile;
+      setState(() => _profile = profile);
+      if (before != null && profile != null) _announceProgress(before, profile);
+    }, onError: (Object error) => debugPrint('Profile stream failed: $error'));
+  }
+
+  void _announceProgress(PlayerProfile before, PlayerProfile after) {
+    final int gained = after.totalXp - before.totalXp;
+    String? message;
+    if (after.prestige > before.prestige) {
+      final PrestigeBadge badge = badgeForPrestige(after.prestige);
+      message = '${badge.emoji} Prestige ${after.prestige}! A new seedling '
+          'is planted.';
+    } else if (gained > 0 && after.level > before.level) {
+      message = '🌳 Level ${after.level}! +${formatXp(gained)} XP, and your '
+          'tree grew.';
+    } else if (gained > 0) {
+      message = '🌊 +${formatXp(gained)} XP';
+    }
+    if (message == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(seconds: 3),
+        action: SnackBarAction(label: 'Profile', onPressed: _openProfile),
+      ),
+    );
+  }
+
+  void _openProfile() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) =>
+            ProfilePage(repository: _progress, service: _progressService),
+      ),
+    );
+  }
+
+  void _openLeaderboard() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) =>
+            LeaderboardPage(repository: _progress),
+      ),
+    );
   }
 
   void _subscribeToLists() {
@@ -920,7 +996,7 @@ class _OceanListsPageState extends State<OceanListsPage> {
               children: <Widget>[
                 _buildTopBar(),
                 if (!_isLoading && _loadError == null && _lists.isNotEmpty)
-                  _buildMainNavigation(),
+                  ...<Widget>[_buildMainNavigation(), _buildXpBar()],
                 Expanded(child: _buildBody()),
               ],
             ),
@@ -1088,13 +1164,18 @@ class _OceanListsPageState extends State<OceanListsPage> {
     );
   }
 
-  /// Avatar menu: shows who is signed in, plus Gemini key and log-out actions.
+  /// Avatar menu: shows who is signed in, plus profile, leaderboard, Gemini
+  /// key and log-out actions.
   Widget _buildAccountMenu() {
     final String email = widget.user.email ?? 'Signed in';
     final String display = widget.user.displayName?.trim().isNotEmpty == true
         ? widget.user.displayName!.trim()
         : email;
-    final String initial = display.isEmpty ? '?' : display[0].toUpperCase();
+    // The player's public initials once they have a profile; until then, the
+    // first letter of their own account name, which only they see.
+    final String initial = _profile != null && _profile!.initials != '?'
+        ? _profile!.initials
+        : (display.isEmpty ? '?' : display[0].toUpperCase());
 
     return PopupMenuButton<String>(
       tooltip: 'Account',
@@ -1105,6 +1186,10 @@ class _OceanListsPageState extends State<OceanListsPage> {
             _signOut();
           case 'apikey':
             _showApiKeyDialog();
+          case 'profile':
+            _openProfile();
+          case 'leaderboard':
+            _openLeaderboard();
         }
       },
       itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
@@ -1130,6 +1215,28 @@ class _OceanListsPageState extends State<OceanListsPage> {
                   ),
                 ),
             ],
+          ),
+        ),
+        const PopupMenuDivider(),
+        PopupMenuItem<String>(
+          value: 'profile',
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.person_outline, size: 20),
+            title: const Text('Profile'),
+            subtitle: _profile == null
+                ? null
+                : Text('${_profile!.displayName} · Level ${_profile!.level}'),
+          ),
+        ),
+        const PopupMenuItem<String>(
+          value: 'leaderboard',
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.leaderboard_outlined, size: 20),
+            title: Text('Leaderboard'),
           ),
         ),
         const PopupMenuDivider(),
@@ -1160,11 +1267,32 @@ class _OceanListsPageState extends State<OceanListsPage> {
         backgroundColor: _theme.accent,
         child: Text(
           initial,
-          style: const TextStyle(
+          style: TextStyle(
             color: Colors.white,
             fontWeight: FontWeight.bold,
+            fontSize: initial.length > 1 ? 13 : null,
           ),
         ),
+      ),
+    );
+  }
+
+  /// Always on screen, so finishing a task visibly fills it. Taps through to
+  /// the profile.
+  Widget _buildXpBar() {
+    final PlayerProfile profile =
+        _profile ?? PlayerProfile.starting(widget.user.uid);
+    final LevelProgress progress = profile.progress;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+      child: OceanXpBar(
+        level: progress.level,
+        fraction: progress.fraction,
+        onTap: _openProfile,
+        label: progress.isMax
+            ? 'MAX LEVEL · tap to prestige'
+            : '${formatXp(progress.xpIntoLevel)} / '
+                  '${formatXp(progress.xpForLevelUp)} XP',
       ),
     );
   }
@@ -1485,6 +1613,18 @@ class _OceanListsPageState extends State<OceanListsPage> {
                 // Firestore round-trip; the stream confirms it a moment later.
                 setState(() => task.isDone = isDone);
                 _planner.setTaskDone(task.id, isDone);
+                if (isDone &&
+                    _profile != null &&
+                    _profile!.dailyCapReachedAt(DateTime.now())) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'Nice work! You have hit today’s XP limit, so this '
+                        'one earns no XP. It resets at midnight.',
+                      ),
+                    ),
+                  );
+                }
               },
               title: Text(
                 task.name,
@@ -1518,6 +1658,15 @@ class _OceanListsPageState extends State<OceanListsPage> {
                       fontWeight: overdue ? FontWeight.bold : FontWeight.normal,
                     ),
                   ),
+                  if (!task.isDone)
+                    Text(
+                      '💧 +${formatXpShort(taskXp(task.durationMinutes))} XP',
+                      style: const TextStyle(
+                        color: Color(0xFF0096C7),
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                 ],
               ),
               secondary: Row(

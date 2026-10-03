@@ -263,8 +263,9 @@ Everything else -- lists, tasks, the calendar -- works without it.
 - [ ] Logging out and back in shows your tasks again
 - [ ] Quackers replies once you add your Gemini key (needs Part 5)
 - [ ] `users/{uid}/private/settings` in the console shows ciphertext, not a key
-- [ ] `flutter test` passes (22 tests)
-- [ ] `cd functions && npm test` passes (20 tests)
+- [ ] Ticking off a task fills the XP bar a few seconds later
+- [ ] `flutter test` passes (169 tests)
+- [ ] `cd functions && npm test` passes (84 tests)
 
 ---
 
@@ -306,9 +307,26 @@ tasks/{taskId}
   createdAt        timestamp
 
 users/{uid}/private/settings
-  geminiApiKey  string
-  updatedAt     timestamp
+  geminiKey      {cipher, iv, tag, v} -- the encrypted Gemini key
+  geminiKeyHint  "...abcd"
+  updatedAt      timestamp
+
+profiles/{uid}                      public to signed-in users
+  displayName    "Brave Otter"
+  adjective, creature, initials, usernameKey
+  xp             XP in the current prestige cycle
+  level          worked out from xp, 1 to 100
+  totalXp        lifetime XP; the leaderboard ranks by this
+  prestige       number of prestiges
+  todayXp, xpDay, xpDayEndsAt       the daily cap counter
+  createdAt, updatedAt
+
+usernames/{adjective-creature}      {uid}: who holds each name
+users/{uid}/xpAwards/{taskId}       {xp, day, at}: one per task paid out
 ```
+
+`profiles`, `usernames` and `xpAwards` are written only by Cloud Functions;
+the rules close them to every client.
 
 Two top-level collections scoped by `ownerId`, which is what the rules match
 against `request.auth.uid`. The app only reads documents whose `ownerId` is the
@@ -378,8 +396,13 @@ Verify:
 firebase functions:list
 ```
 
-You want four functions in `us-central1`: `askQuackers`, `saveGeminiKey`,
-`quackersStatus`, `deleteGeminiKey`.
+You want eight functions in `us-central1`: `askQuackers`, `saveGeminiKey`,
+`quackersStatus`, `deleteGeminiKey`, `awardTaskXp`, `ensureProfile`,
+`setUsername` and `prestige`.
+
+`awardTaskXp` is a Firestore trigger. The first deploy of a trigger can fail
+with a message about the Eventarc service agent while Google sets up
+permissions; wait five minutes and deploy again.
 
 ## 5.3 Deploy the updated rules
 
@@ -446,8 +469,12 @@ each device instead.
 | `quackersStatus` | Whether a key is saved, plus that hint. Never the key. |
 | `deleteGeminiKey` | Forgets the caller's key. |
 | `askQuackers` | Decrypts the caller's key, runs Gemini with the planner tools, returns the reply and any proposed changes. |
+| `awardTaskXp` | Trigger: grants XP when a task is ticked off. |
+| `ensureProfile` | Gives a new player a profile and a random name. |
+| `setUsername` | Changes the caller's name to one built from the word lists. |
+| `prestige` | Level 100 back to level 1, with a badge. |
 
-All four reject unauthenticated callers. `askQuackers` also validates input
+The callable functions reject unauthenticated callers. `askQuackers` also validates input
 (2000-char question, 8000-char context, last 20 turns) and rate limits to 30
 requests per 10 minutes per account, counted in `rateLimits/{uid}` inside a
 transaction so simultaneous calls cannot both slip past. Tune the constants in
@@ -502,6 +529,59 @@ this change, run `firebase deploy --only functions` before using the new app.
 Older app builds keep working against the new function: without a snapshot it
 answers as before and proposes nothing.
 
+# XP, levels and the leaderboard
+
+Finishing a task earns XP. XP fills the bar under the Lists/Calendar switch,
+levels you up, grows the tree on your profile, and ranks you on the
+leaderboard. Tap the bar, or the avatar menu, for your profile.
+
+**Levels** follow the RuneScape curve: each level costs about 10% more than the
+last, so level 92 is half of level 99, and level 100 takes 14,391,160 XP. The
+numbers live in `functions/progress.js` (the app's copy is
+`lib/progress/leveling.dart`; a test checks they agree at every level).
+
+| | |
+| --- | --- |
+| A task | 20,000 XP, plus 5,000 for each half hour past the first, up to 40,000 |
+| Daily cap | 160,000 XP -- about eight tasks |
+| Level 100 | about 90 days of hitting the cap |
+
+Because the curve is steep, early levels come fast: a first task reaches about
+level 33 and a full first day about level 54. The last eight levels take half
+the three months.
+
+**Stopping farming.** XP is granted by the `awardTaskXp` trigger, never by the
+app, and clients cannot write profiles, so nobody can edit their own level.
+Each task pays out once, ever, so unticking and reticking earns nothing. The
+daily cap is what stops creating and ticking off throwaway tasks: however many,
+a day earns at most 160,000 XP. Days reset at midnight in `XP_TIME_ZONE`
+(`functions/.env.ocean-list`, default `America/Los_Angeles`). It is one zone
+for everyone, because letting each device choose would let a player move
+midnight and collect the cap twice.
+
+**Prestige** is optional, from level 100: back to level 1, the tree back to a
+seedling, and a badge that is cooler each time (seashell, crab, tropical fish,
+turtle, octopus, dolphin, shark, whale, merfolk, trident, crown, diamond). XP
+keeps counting at level 100, and anything past it carries over on prestige, so
+waiting costs nothing. The leaderboard ranks by lifetime XP, so prestiging
+never costs a place either.
+
+**Usernames** are chosen, never typed: one adjective and one sea creature from
+`functions/usernameWords.json`, like "Brave Otter". That is what guarantees
+nothing inappropriate: there is no free text for a spelling, spacing or
+lookalike-letter trick to get through. Every word was picked to be harmless
+alone and in any pairing, and pairs whose initials read badly ("Swift Seal",
+SS) are left out. The server rejects anything not built exactly from the
+file, names are unique, and avatars are initials only. To add words, edit the
+JSON and `lib/progress/username_words.dart` together; a test fails if they
+differ.
+
+To deploy this part:
+
+```bash
+firebase deploy --only functions,firestore:rules
+```
+
 ## Changing the model
 
 Set `GEMINI_MODEL` in `functions/.env` and redeploy:
@@ -529,7 +609,8 @@ Pure logic, no emulator needed:
 cd functions && npm test
 ```
 
-58 tests: encryption round-trip, tamper detection, IV uniqueness, wrong master
-key, the rate limit window boundaries, every planner tool, and the
+84 tests: encryption round-trip, tamper detection, IV uniqueness, wrong master
+key, the rate limit window boundaries, every planner tool, the
 function-calling loop (driven by a scripted fake model, so no Gemini key is
-needed).
+needed), the level curve, daily cap and day boundaries across daylight-saving
+changes, prestige, and the username rules.

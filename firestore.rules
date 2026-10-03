@@ -41,6 +41,28 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Player profiles: username, initials, level, XP, prestige.
+    //
+    // Readable by any signed-in user, because that is what the leaderboard
+    // shows. Written only by the progress Cloud Functions -- the XP trigger,
+    // setUsername and prestige -- so no client can raise its own level or set a
+    // name that did not come from the approved word lists.
+    match /profiles/{userId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // Which player holds each username, so names stay unique. Server only.
+    match /usernames/{nameKey} {
+      allow read, write: if false;
+    }
+
+    // One record per task that has paid out XP, so a task cannot pay twice.
+    // Server only: a client that could delete these could farm the same task.
+    match /users/{userId}/xpAwards/{taskId} {
+      allow read, write: if false;
+    }
+
     // Encrypted Gemini API keys.
     //
     // Denied to every client, including the owner. The key is written only by

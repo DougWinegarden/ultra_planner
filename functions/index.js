@@ -23,6 +23,7 @@
  */
 
 const {onCall, HttpsError} = require("firebase-functions/v2/https");
+const {onDocumentWritten} = require("firebase-functions/v2/firestore");
 const {defineSecret, defineString} = require("firebase-functions/params");
 const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
@@ -35,6 +36,14 @@ const {
   plannerInstructions,
 } = require("./plannerTools");
 const {runToolLoop} = require("./toolLoop");
+const {
+  taskXp,
+  xpDay,
+  applyAward,
+  applyPrestige,
+  validateUsername,
+  randomUsername,
+} = require("./progress");
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -54,6 +63,15 @@ const db = admin.firestore();
 const ENCRYPTION_KEY = defineSecret("GEMINI_KEY_ENCRYPTION_KEY");
 
 /** Model id, overridable via functions/.env without a code change. */
+/**
+ * The zone whose midnight resets everyone's daily XP cap. One zone for all
+ * players: letting each device pick its own would let a player move midnight
+ * and collect the cap twice. Set in functions/.env.<project>.
+ */
+const XP_TIME_ZONE = defineString("XP_TIME_ZONE", {
+  default: "America/Los_Angeles",
+});
+
 const GEMINI_MODEL = defineString("GEMINI_MODEL", {
   default: "gemini-3.5-flash-lite",
 });
@@ -470,5 +488,282 @@ exports.askQuackers = onCall(
     }
 
     return {text: text, actions: actions};
+  },
+);
+
+// --- Progress: XP, levels, usernames ----------------------------------------
+//
+// profiles/{uid}           public to signed-in users (the leaderboard); only
+//                          these functions write it
+// usernames/{key}          {uid}: which player holds each name
+// users/{uid}/xpAwards/{taskId}
+//                          one record per task that has paid out
+//
+// All three are closed to clients in firestore.rules. The rules in
+// progress.js decide everything; this section only reads and writes.
+
+/** Fields every new profile starts with. */
+function newProfileDefaults() {
+  return {
+    xp: 0,
+    level: 1,
+    totalXp: 0,
+    prestige: 0,
+    todayXp: 0,
+    xpDay: "",
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+}
+
+/**
+ * The profile fields for a username.
+ *
+ * @param {object} name Result of validateUsername or pickFreeUsername.
+ * @return {object} Fields to write.
+ */
+function nameFields(name) {
+  return {
+    displayName: name.displayName,
+    adjective: name.adjective,
+    creature: name.creature,
+    initials: name.initials,
+    // Unset for the unclaimed fallback, so changing away from it never
+    // releases a claim that belongs to someone else.
+    usernameKey: name.unclaimed ? null : name.key,
+  };
+}
+
+/**
+ * A random name nobody holds yet. Reads only, so it can run before a
+ * transaction's writes.
+ *
+ * @param {FirebaseFirestore.Transaction} tx The transaction.
+ * @return {Promise<object>} The name; `unclaimed` is set on the rare fallback
+ *     when every try was taken, and it is then shared rather than claimed.
+ */
+async function pickFreeUsername(tx) {
+  let name = randomUsername();
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const claim = await tx.get(db.collection("usernames").doc(name.key));
+    if (!claim.exists) return name;
+    name = randomUsername();
+  }
+  return {...name, unclaimed: true};
+}
+
+/**
+ * @return {string} XP_TIME_ZONE, or Los Angeles if it is not a real zone.
+ */
+function xpTimeZone() {
+  const zone = XP_TIME_ZONE.value();
+  try {
+    new Intl.DateTimeFormat("en-US", {timeZone: zone});
+    return zone;
+  } catch (error) {
+    logger.error("XP_TIME_ZONE is not a valid time zone", {zone: zone});
+    return "America/Los_Angeles";
+  }
+}
+
+/**
+ * Awards XP the moment a task is ticked off.
+ *
+ * A trigger rather than a call from the app, so XP is granted however the task
+ * was completed -- the checkbox, Quackers, or offline and synced later -- and
+ * a client has no way to grant itself XP.
+ *
+ * Each task pays out at most once, recorded in users/{uid}/xpAwards, so
+ * unticking and reticking earns nothing. The daily cap is what stops farming
+ * by creating and ticking off throwaway tasks.
+ */
+exports.awardTaskXp = onDocumentWritten(
+  {document: "tasks/{taskId}", region: "us-central1", maxInstances: 10},
+  async (event) => {
+    const change = event.data;
+    const before = change && change.before.exists ?
+      change.before.data() :
+      null;
+    const after = change && change.after.exists ? change.after.data() : null;
+
+    // Only the moment a task becomes done earns anything.
+    if (!after || after.isDone !== true) return;
+    if (before && before.isDone === true) return;
+
+    // The task rules guarantee ownerId is the account that wrote it.
+    const uid = after.ownerId;
+    if (typeof uid !== "string" || uid === "") return;
+
+    const taskId = event.params.taskId;
+    const value = taskXp(after.durationMinutes);
+    const day = xpDay(Date.now(), xpTimeZone());
+    const profileRef = db.collection("profiles").doc(uid);
+    const awardRef = db
+      .collection("users")
+      .doc(uid)
+      .collection("xpAwards")
+      .doc(taskId);
+
+    await db.runTransaction(async (tx) => {
+      const [awardSnap, profileSnap] = await Promise.all([
+        tx.get(awardRef),
+        tx.get(profileRef),
+      ]);
+      // Triggers can fire more than once; the record makes that harmless.
+      if (awardSnap.exists) return;
+
+      const profile = profileSnap.exists ? profileSnap.data() : null;
+      const {award, update} = applyAward(profile, value, day);
+      // Nothing is recorded when the cap is spent, so ticking the task again
+      // on a later day still counts -- the same as doing it that day.
+      if (award === 0) return;
+
+      const name = profile && profile.displayName ?
+        null :
+        await pickFreeUsername(tx);
+
+      const fields = {
+        ...update,
+        xpDayEndsAt: admin.firestore.Timestamp.fromMillis(update.xpDayEndsAt),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+      if (name) {
+        if (!name.unclaimed) {
+          tx.set(db.collection("usernames").doc(name.key), {uid: uid});
+        }
+        Object.assign(fields, nameFields(name));
+        if (!profile) {
+          fields.prestige = 0;
+          fields.createdAt = admin.firestore.FieldValue.serverTimestamp();
+        }
+      }
+
+      tx.set(profileRef, fields, {merge: true});
+      tx.set(awardRef, {
+        xp: award,
+        day: day.key,
+        at: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+  },
+);
+
+/**
+ * Gives a new player a profile with a random name, so they appear on the
+ * leaderboard and have something to change. Does nothing if they have one.
+ */
+exports.ensureProfile = onCall(
+  {region: "us-central1", maxInstances: 5},
+  async (request) => {
+    const uid = requireUid(request);
+    const profileRef = db.collection("profiles").doc(uid);
+
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(profileRef);
+      if (snap.exists && snap.data().displayName) return;
+
+      const name = await pickFreeUsername(tx);
+      if (!name.unclaimed) {
+        tx.set(db.collection("usernames").doc(name.key), {uid: uid});
+      }
+      tx.set(
+        profileRef,
+        {
+          ...(snap.exists ? {} : newProfileDefaults()),
+          ...nameFields(name),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        {merge: true},
+      );
+    });
+
+    return {ok: true};
+  },
+);
+
+/**
+ * Changes the caller's username to one built from the word lists.
+ *
+ * The only way a name reaches a profile. validateUsername refuses anything not
+ * made exactly from usernameWords.json, so no spelling, spacing or lookalike
+ * trick can produce an inappropriate name; and names are unique, held in
+ * usernames/{key}.
+ */
+exports.setUsername = onCall(
+  {region: "us-central1", maxInstances: 5},
+  async (request) => {
+    const uid = requireUid(request);
+    const data = request.data || {};
+
+    let name;
+    try {
+      name = validateUsername(data.adjective, data.creature);
+    } catch (error) {
+      throw new HttpsError("invalid-argument", error.message);
+    }
+
+    const profileRef = db.collection("profiles").doc(uid);
+    const claimRef = db.collection("usernames").doc(name.key);
+
+    await db.runTransaction(async (tx) => {
+      const [profileSnap, claimSnap] = await Promise.all([
+        tx.get(profileRef),
+        tx.get(claimRef),
+      ]);
+      if (claimSnap.exists && claimSnap.data().uid !== uid) {
+        throw new HttpsError(
+          "already-exists",
+          `Someone is already ${name.displayName}. Try another.`,
+        );
+      }
+
+      const profile = profileSnap.exists ? profileSnap.data() : null;
+      const oldKey = profile && profile.usernameKey;
+      if (oldKey && oldKey !== name.key) {
+        tx.delete(db.collection("usernames").doc(oldKey));
+      }
+      tx.set(claimRef, {uid: uid});
+      tx.set(
+        profileRef,
+        {
+          ...(profile ? {} : newProfileDefaults()),
+          ...nameFields(name),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        {merge: true},
+      );
+    });
+
+    return {displayName: name.displayName, initials: name.initials};
+  },
+);
+
+/**
+ * Prestige: from level 100 back to level 1, one more prestige badge, and any
+ * XP earned beyond level 100 carried over.
+ */
+exports.prestige = onCall(
+  {region: "us-central1", maxInstances: 5},
+  async (request) => {
+    const uid = requireUid(request);
+    const profileRef = db.collection("profiles").doc(uid);
+
+    return db.runTransaction(async (tx) => {
+      const snap = await tx.get(profileRef);
+      let update;
+      try {
+        update = applyPrestige(snap.exists ? snap.data() : null);
+      } catch (error) {
+        throw new HttpsError("failed-precondition", error.message);
+      }
+      tx.set(
+        profileRef,
+        {
+          ...update,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        {merge: true},
+      );
+      return update;
+    });
   },
 );
